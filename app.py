@@ -19,6 +19,20 @@ MONTHS = {
     "jan":1,"feb":2,"mar":3,"apr":4,"jun":6,"jul":7,"aug":8,"sep":9,"sept":9,"oct":10,"nov":11,"dec":12
 }
 
+# ── mapping de keywords a dirección ────────────────────────────────────────────
+KEYWORDS = {
+    # Entradas
+    "ACH IN": "in", "ACH CREDIT": "in", "ACH DEPOSIT": "in",
+    "ACH        SOUL PROPERTY": "in", "WIRE IN": "in", "DEPOSIT": "in",
+    "ADDITION": "in", "CREDIT": "in", "ACH WISBOO": "in", "ACH WISE": "in",
+
+    # Salidas
+    "ACH PULL": "out", "ACH DEBIT": "out", "BILL PAID": "out", "BILL PMT": "out",
+    "WIRE OUT": "out", "WIRE FEE": "out", "DEBIT MEMO": "out", "FEE": "out",
+    "DBT CRD": "out", "POS DEB": "out", "CHECK": "out", "WITHDRAWAL": "out",
+    "FACEBOOK": "out", "AMAZON": "out", "UBER": "out", "BEST BUY": "out",
+}
+
 def norm(s: str) -> str:
     return (s or "").replace("\u00A0", " ").replace("–", "-").replace("—", "-").strip()
 
@@ -29,7 +43,8 @@ def parse_mmdd(s: str, fallback_year: int) -> Optional[str]:
     mm, dd, yy = m.group(1), m.group(2), m.group(3)
     if yy:
         y = int(yy)
-        if y < 100: y = 2000 + y
+        if y < 100: 
+            y = 2000 + y
     else:
         y = fallback_year
     return f"{y:04d}-{int(mm):02d}-{int(dd):02d}"
@@ -50,11 +65,19 @@ def pick_amount_from_tokens(tokens: List[str]) -> Optional[float]:
     pref = next((t for t in tokens if "-" in t or "(" in t), None)
     tok = pref or tokens[0]
     val = tok.replace("$", "").replace(",", "")
-    if "(" in tok: val = "-" + val.replace("(", "").replace(")", "")
+    if "(" in tok: 
+        val = "-" + val.replace("(", "").replace(")", "")
     try:
         return float(val)
     except:
         return None
+
+def detect_direction(description: str, amount: float) -> str:
+    desc_upper = description.upper()
+    for key, direction in KEYWORDS.items():
+        if key in desc_upper:
+            return direction
+    return "out" if amount < 0 else "in"
 
 # ── core: convertir PDF a líneas y detectar transacciones ─────────────────────
 def pdf_to_lines(pdf_bytes: bytes) -> List[str]:
@@ -114,46 +137,36 @@ def parse_transactions_minimal(pdf_bytes: bytes) -> List[Dict[str, Any]]:
         amount = pick_amount_from_tokens(tokens_here)
 
         j = i + 1
-        # si no lo encontramos, buscamos en las 1–3 líneas siguientes (típico BOFA: monto solo en la línea de abajo)
+        # si no lo encontramos, buscamos en las 1–3 líneas siguientes
         while amount is None and j < n and j <= i + 3:
             nxt = lines[j]
-            # si la siguiente línea ya empieza con fecha, paramos (no hubo monto para este bloque)
             if RE_DATE_SLASH.match(nxt) or RE_DATE_LONG.search(nxt):
                 break
             tokens_next = RE_AMOUNT_ANY.findall(nxt)
-            # si la línea ES solo el monto, guardamos y no metemos ese texto en la descripción
             if tokens_next and nxt.strip() == tokens_next[0]:
                 amount = pick_amount_from_tokens(tokens_next)
                 j += 1
                 break
-            # si trae texto + monto, concatenamos y tomamos monto
             if tokens_next:
                 amount = pick_amount_from_tokens(tokens_next)
                 desc_parts.append(nxt)
                 j += 1
                 break
-            # solo texto de continuación
             desc_parts.append(nxt)
             j += 1
 
-        # si hay 2 importes en la misma línea (monto+balance), ya lo resolvimos arriba con pick_amount_from_tokens
-
         if amount is not None:
-            # limpiar descripción: quitar el token de monto si quedó pegado al final
             desc = " ".join(desc_parts).strip()
-            # si la última parte es "123.45" sola, probablemente ya la excluimos,
-            # pero por si acaso, borramos el último token de monto al final.
             desc = re.sub(r"\s*\(?-?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})\)?\s*$", "", desc).strip()
 
             txs.append({
                 "date": date_iso,
                 "description": desc,
-                "amount": float(amount),
+                "amount": abs(float(amount)),  # normalizamos siempre positivo
+                "direction": detect_direction(desc, amount),
             })
-
-            i = j  # saltamos a lo que quedó después del bloque
+            i = j
         else:
-            # No se encontró monto para este bloque: lo descartamos (no queremos falsos positivos)
             i += 1
 
     return txs
