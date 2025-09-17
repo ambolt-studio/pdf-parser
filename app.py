@@ -9,14 +9,9 @@ import pdfplumber
 app = FastAPI()
 
 # ── patrones ───────────────────────────────────────────────────────────
-RE_DATE_SLASH = re.compile(r"^\s*(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")   # 08/15 o 08/15/24
+RE_DATE_SLASH = re.compile(r"^\s*(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")
 RE_DATE_LONG  = re.compile(r"\b([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})\b", re.I)
 RE_AMOUNT_ANY = re.compile(r"\(?-?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})\)?")
-
-# Nueva regex: fecha + descripción + monto + balance opcional
-RE_TX_LINE = re.compile(
-    r"^\s*(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\s+(.+?)\s+(-?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s+(?:-?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})?)?\s*$"
-)
 
 MONTHS = {
     "january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
@@ -28,7 +23,7 @@ MONTHS = {
 KEYWORDS = {
     # Entradas
     "ACH IN": "in", "ACH CREDIT": "in", "ACH DEPOSIT": "in",
-    "ACH        SOUL PROPERTY": "in", "WIRE IN": "in", "DEPOSIT": "in",
+    "SOUL PROPERTY": "in", "WIRE IN": "in", "DEPOSIT": "in",
     "ADDITION": "in", "CREDIT": "in", "ACH WISBOO": "in", "ACH WISE": "in",
 
     # Salidas
@@ -49,8 +44,7 @@ def parse_mmdd(s: str, fallback_year: int) -> Optional[str]:
     mm, dd, yy = m.group(1), m.group(2), m.group(3)
     if yy:
         y = int(yy)
-        if y < 100: 
-            y = 2000 + y
+        if y < 100: y = 2000 + y
     else:
         y = fallback_year
     return f"{y:04d}-{int(mm):02d}-{int(dd):02d}"
@@ -84,7 +78,67 @@ def detect_direction(description: str, amount: float) -> str:
             return direction
     return "out" if amount < 0 else "in"
 
-def pdf_to_lines(pdf_bytes: bytes) -> List[str]:
+def detect_fallback_year(text: str) -> int:
+    m = re.search(r"\b(20\d{2})\b", text)
+    if m:
+        return int(m.group(1))
+    return datetime.utcnow().year
+
+# ── parser tabla-aware ──────────────────────────────────────────────────
+def parse_transactions_table(pdf_bytes: bytes) -> List[Dict[str, Any]]:
+    txs: List[Dict[str, Any]] = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+        fallback_year = detect_fallback_year(full_text)
+
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            if not tables:
+                continue
+            for table in tables:
+                for row in table:
+                    if not row or len(row) < 2:
+                        continue
+                    raw_date = str(row[0]).strip()
+                    if not raw_date:
+                        continue
+
+                    # detectar fecha
+                    date_iso = None
+                    if RE_DATE_SLASH.match(raw_date):
+                        date_iso = parse_mmdd(raw_date, fallback_year)
+                    elif RE_DATE_LONG.search(raw_date):
+                        date_iso = parse_long_date(raw_date)
+
+                    if not date_iso:
+                        continue
+
+                    # heurística: monto suele estar en penúltima col (antes del balance)
+                    amt_raw = None
+                    if len(row) >= 3:
+                        amt_raw = row[-2] if re.search(r"\d", str(row[-2])) else row[-1]
+                    else:
+                        amt_raw = row[-1]
+
+                    amt = pick_amount_from_tokens([str(amt_raw)]) if amt_raw else None
+                    if amt is None:
+                        continue
+
+                    # descripción = todas las columnas intermedias
+                    desc = " ".join(c for c in row[1:-2] if c).strip()
+                    if not desc and len(row) > 1:
+                        desc = str(row[1]).strip()
+
+                    txs.append({
+                        "date": date_iso,
+                        "description": desc,
+                        "amount": abs(amt),
+                        "direction": detect_direction(desc, amt),
+                    })
+    return txs
+
+# ── parser line-based (fallback) ────────────────────────────────────────
+def parse_transactions_linebased(pdf_bytes: bytes) -> List[Dict[str, Any]]:
     lines: List[str] = []
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for p in pdf.pages:
@@ -93,57 +147,19 @@ def pdf_to_lines(pdf_bytes: bytes) -> List[str]:
                 ln = norm(ln)
                 if ln:
                     lines.append(ln)
-    return lines
 
-def detect_fallback_year(lines: List[str]) -> int:
-    for ln in lines:
-        m = re.search(r"\b(20\d{2})\b", ln)
-        if m:
-            return int(m.group(1))
-    return datetime.utcnow().year
-
-# ── core parser ─────────────────────────────────────────────────────────
-def parse_transactions_minimal(pdf_bytes: bytes) -> List[Dict[str, Any]]:
-    lines = pdf_to_lines(pdf_bytes)
-    if not lines:
-        return []
-
-    fallback_year = detect_fallback_year(lines)
+    full_text = "\n".join(lines)
+    fallback_year = detect_fallback_year(full_text)
     txs: List[Dict[str, Any]] = []
-    i = 0
-    n = len(lines)
+    i, n = 0, len(lines)
 
     while i < n:
         line = lines[i]
-
-        # 🔹 Primero intentamos con regex fuerte (fecha + desc + monto + balance opcional)
-        mtx = RE_TX_LINE.match(line)
-        if mtx:
-            mm, dd, yy, desc, amt_raw = mtx.groups()
-            year = int(yy) if yy else fallback_year
-            if year < 100: 
-                year = 2000 + year
-            date_iso = f"{year:04d}-{int(mm):02d}-{int(dd):02d}"
-            amt = pick_amount_from_tokens([amt_raw])
-            if amt is not None:
-                txs.append({
-                    "date": date_iso,
-                    "description": desc.strip(),
-                    "amount": abs(amt),
-                    "direction": detect_direction(desc, amt),
-                })
-            i += 1
-            continue
-
-        # 🔹 Si no matchea, usamos el flujo viejo
         date_iso: Optional[str] = None
-        m1 = RE_DATE_SLASH.match(line)
-        if m1:
-            date_iso = parse_mmdd(m1.group(0), fallback_year)
-        else:
-            d_long = parse_long_date(line)
-            if d_long:
-                date_iso = d_long
+        if RE_DATE_SLASH.match(line):
+            date_iso = parse_mmdd(line, fallback_year)
+        elif RE_DATE_LONG.search(line):
+            date_iso = parse_long_date(line)
 
         if not date_iso:
             i += 1
@@ -187,8 +203,13 @@ def parse_transactions_minimal(pdf_bytes: bytes) -> List[Dict[str, Any]]:
 
     return txs
 
-# ── endpoint ───────────────────────────────────────────────────────────
+# ── endpoint único ─────────────────────────────────────────────────────
 @app.post("/parse")
 async def parse_pdf(file: UploadFile = File(...)) -> List[Dict[str, Any]]:
     pdf_bytes = await file.read()
-    return parse_transactions_minimal(pdf_bytes)
+    # 1) intentamos tabla-aware
+    txs = parse_transactions_table(pdf_bytes)
+    if txs:
+        return txs
+    # 2) fallback: line-based
+    return parse_transactions_linebased(pdf_bytes)
