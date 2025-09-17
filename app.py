@@ -1,6 +1,5 @@
 import io
 import re
-import statistics
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -9,357 +8,158 @@ import pdfplumber
 
 app = FastAPI()
 
-# ===== Regex y constantes =====
-MONEY_RE = re.compile(r"\(?-?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})\)?$")
-MONEY_ANY_RE = re.compile(r"\(?-?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})\)?")
-DATE_MMDD_RE = re.compile(r"^\s*(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?")
-LONG_EN_RE = re.compile(r"\b([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})\b", re.I)
-LONG_ES1_RE = re.compile(r"\b(\d{1,2})\s+de\s+([A-Za-zÁÉÍÓÚáéíóú]+)\s+de\s+(\d{4})\b", re.I)
+# ── patrones básicos ───────────────────────────────────────────────────────────
+RE_DATE_SLASH = re.compile(r"^\s*(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")   # 08/15 o 08/15/24
+RE_DATE_LONG  = re.compile(r"\b([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})\b", re.I)  # August 15, 2024
+RE_AMOUNT_ANY = re.compile(r"\(?-?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})\)?")   # -1,234.56 | ($12.00) | 92.44
 
-IGNORE_UP = [
-    "SERVICE CHARGE SUMMARY",
-    "WAIVE",
-    "PRICE/UNIT",
-    "BANKCARD FEE",
-    "BANKCARD DISCOUNT FEE",
-    "BANKCARD INTERCHANGE FEE",
-]
-
-MONTH_EN = {
-  "january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
-  "july":7,"august":8,"september":9,"october":10,"november":11,"december":12,
-  "sept":9,"septembe":9
-}
-MONTH_ES = {
-  "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
-  "julio":7,"agosto":8,"septiembre":9,"setiembre":9,"octubre":10,"noviembre":11,"diciembre":12
+MONTHS = {
+    "january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
+    "july":7,"august":8,"september":9,"october":10,"november":11,"december":12,
+    "jan":1,"feb":2,"mar":3,"apr":4,"jun":6,"jul":7,"aug":8,"sep":9,"sept":9,"oct":10,"nov":11,"dec":12
 }
 
-# ===== Utilidades =====
 def norm(s: str) -> str:
     return (s or "").replace("\u00A0", " ").replace("–", "-").replace("—", "-").strip()
 
-def parse_long_date(text: str) -> Optional[str]:
-    m = LONG_EN_RE.search(text)
-    if m:
-        mon = MONTH_EN.get(m.group(1).lower())
-        if mon:
-            return f"{m.group(3)}-{int(mon):02d}-{int(m.group(2)):02d}"
-    m = LONG_ES1_RE.search(text)
-    if m:
-        mon = MONTH_ES.get(m.group(2).lower())
-        if mon:
-            return f"{m.group(3)}-{int(mon):02d}-{int(m.group(1)):02d}"
-    return None
-
 def parse_mmdd(s: str, fallback_year: int) -> Optional[str]:
-    m = DATE_MMDD_RE.match(s)
+    m = RE_DATE_SLASH.match(s)
     if not m:
         return None
     mm, dd, yy = m.group(1), m.group(2), m.group(3)
     if yy:
         y = int(yy)
-        if y < 100:
-            y = 2000 + y
+        if y < 100: y = 2000 + y
     else:
         y = fallback_year
     return f"{y:04d}-{int(mm):02d}-{int(dd):02d}"
 
-def detect_period(text: str) -> Optional[Dict[str, str]]:
-    # "for August 1 2024 to August 31 2024"
-    m = re.search(r"for\s+([A-Za-z]+\s+\d{1,2}\s*\d{0,2}?)\s+to\s+([A-Za-z]+\s+\d{1,2}\s*\d{0,2}?)", text, re.I)
-    if m:
-        y = re.search(r"\b(20\d{2})\b", text)
-        year = y.group(1) if y else str(datetime.utcnow().year)
-        a = parse_long_date(m.group(1) + ", " + year)
-        b = parse_long_date(m.group(2) + ", " + year)
-        if a and b:
-            return {"start": a, "end": b}
-
-    # "SUMMARY FOR THE PERIOD: 06/01/24 - 06/30/24"
-    m = re.search(r"SUMMARY\s+FOR\s+THE\s+PERIOD:\s*(\d{1,2}/\d{1,2}/\d{2,4})\s*-\s*(\d{1,2}/\d{1,2}/\d{2,4})", text, re.I)
-    if m:
-        def mmdd(s):
-            p = s.split("/")
-            y = int(p[2]); y = 2000 + y if y < 100 else y
-            return f"{y}-{int(p[0]):02d}-{int(p[1]):02d}"
-        return {"start": mmdd(m.group(1)), "end": mmdd(m.group(2))}
-
-    # Fallback: usar primera fecha larga encontrada como "ending"
-    end = parse_long_date(text)
-    if end:
-        y, m2, _ = map(int, end.split("-"))
-        start = f"{y}-{m2:02d}-01"
-        return {"start": start, "end": end}
-    return None
-
-def in_period(date_iso: str, period: Optional[Dict[str, str]]) -> bool:
-    if not period or not date_iso:
-        return True
-    return period["start"] <= date_iso <= period["end"]
-
-def to_amount_token(row_text: str, right_x: Optional[float], words_in_row: List[dict]) -> Optional[float]:
-    # 1) Buscar tokens de dinero por palabra (coordenadas) para priorizar la columna derecha
-    candidates = []
-    for w in words_in_row:
-        txt = norm(w["text"])
-        if MONEY_ANY_RE.fullmatch(txt):
-            candidates.append((w["x0"], txt))
-
-    token = None
-    if right_x is not None and candidates:
-        token = min(candidates, key=lambda c: abs(c[0] - right_x))[1]
-    elif candidates:
-        token = next((t for _, t in candidates if "-" in t or "(" in t), None) or candidates[0][1]
-    else:
-        # 2) Fallback: escanear el texto completo de la fila
-        m_all = list(MONEY_ANY_RE.finditer(row_text))
-        if m_all:
-            token = next((m.group(0) for m in m_all if "-" in m.group(0) or "(" in m.group(0)), m_all[0].group(0))
-
-    if not token:
+def parse_long_date(s: str) -> Optional[str]:
+    m = RE_DATE_LONG.search(s)
+    if not m:
         return None
+    mon = MONTHS.get(m.group(1).lower())
+    if not mon:
+        return None
+    return f"{m.group(3)}-{mon:02d}-{int(m.group(2)):02d}"
 
-    num = token.replace("$", "").replace(",", "")
-    if "(" in token:
-        num = "-" + num.replace("(", "").replace(")", "")
+def pick_amount_from_tokens(tokens: List[str]) -> Optional[float]:
+    if not tokens:
+        return None
+    # preferimos el que tenga signo negativo o paréntesis
+    pref = next((t for t in tokens if "-" in t or "(" in t), None)
+    tok = pref or tokens[0]
+    val = tok.replace("$", "").replace(",", "")
+    if "(" in tok: val = "-" + val.replace("(", "").replace(")", "")
     try:
-        return float(num)
-    except Exception:
+        return float(val)
+    except:
         return None
 
-def classify_channel(s: str) -> str:
-    t = s.lower()
-    if re.search(r"\b(check ?card|card|purchase|visa|mastercard|paypal|mc|debit)\b", t):
-        return "card"
-    if "zelle" in t:
-        return "zelle"
-    if re.search(r"\bach\b|\beft\b|\btransfer\b", t) and "wire" not in t:
-        return "ach"
-    if re.search(r"\bwire\b|\bwt\b", t):
-        return "wire"
-    if re.search(r"\bfee\b|overdraft|service charge|maintenance charge", t):
-        return "fee"
-    return "other"
+# ── core: convertir PDF a líneas y detectar transacciones ─────────────────────
+def pdf_to_lines(pdf_bytes: bytes) -> List[str]:
+    lines: List[str] = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for p in pdf.pages:
+            # tolerancias algo amplias para unir bloques (BOFA / Wells)
+            txt = p.extract_text(x_tolerance=2, y_tolerance=3) or ""
+            for ln in txt.split("\n"):
+                ln = norm(ln)
+                if ln:
+                    lines.append(ln)
+    return lines
 
-def classify_direction(desc: str, amount: float) -> str:
-    if amount < 0:
-        return "out"
-    if amount > 0:
-        return "in"
-    t = desc.lower()
-    if re.search(r"deposit|credit|money added|incoming", t):
-        return "in"
-    if re.search(r"withdraw|debit|outgoing|payment|fee", t):
-        return "out"
-    return "unknown"
+def detect_fallback_year(lines: List[str]) -> int:
+    # buscamos un año en el documento; si no, usamos el actual
+    for ln in lines:
+        m = re.search(r"\b(20\d{2})\b", ln)
+        if m:
+            return int(m.group(1))
+    return datetime.utcnow().year
 
-def extract_ref(s: str) -> Optional[str]:
-    m = re.search(r"(?:Conf(?:irmation)?#|Confirmation#|Conf#|Ref:|Reference:|ID:|Transaction:)\s*([A-Za-z0-9\-]+)", s, re.I)
-    if m:
-        return m.group(1)
-    m = re.search(r"\b[A-Za-z0-9]{8,}\b", s)
-    return m.group(0) if m else None
+def parse_transactions_minimal(pdf_bytes: bytes) -> List[Dict[str, Any]]:
+    lines = pdf_to_lines(pdf_bytes)
+    if not lines:
+        return []  # probablemente escaneado (sin OCR)
 
-def extract_counterparty(s: str) -> Optional[str]:
-    m = re.search(r"\b(?:to|from)\s+(.+?)(?:\s+(?:Conf#|Confirmation#|ID:|Ref:|Reference:|USD|Amount|$))", s, re.I)
-    if m:
-        cand = re.sub(r"\s{2,}", " ", m.group(1).strip())
-        return cand if len(cand) >= 3 else None
-    words = [w for w in re.split(r"\s+", s) if w and w.isalpha() and len(w) > 2]
-    if len(words) >= 2:
-        return f"{words[0]} {words[1]}"
-    return None
+    fallback_year = detect_fallback_year(lines)
+    txs: List[Dict[str, Any]] = []
 
-def should_ignore(block_text_up: str) -> bool:
-    return any(k in block_text_up for k in IGNORE_UP)
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
 
-# ===== Endpoint principal =====
-@app.post("/parse")
-async def parse_pdf(file: UploadFile = File(...)) -> List[Dict[str, Any]]:
-    raw = await file.read()
-    buf = io.BytesIO(raw)
+        # 1) ¿Empieza con fecha? (mm/dd[/yy] o "Month dd, yyyy")
+        date_iso: Optional[str] = None
 
-    with pdfplumber.open(buf) as pdf:
-        # 1) Extraer palabras + formar filas por página
-        all_text = []
-        pages_rows = []
-        amount_xs = []
+        m1 = RE_DATE_SLASH.match(line)
+        if m1:
+            date_iso = parse_mmdd(m1.group(0), fallback_year)
+        else:
+            d_long = parse_long_date(line)
+            if d_long:
+                date_iso = d_long
 
-        for page in pdf.pages:
-            words = page.extract_words(use_text_flow=True, extra_attrs=["x0", "x1", "top", "bottom"])
-            words = sorted(words, key=lambda w: (w["top"], w["x0"]))
+        if not date_iso:
+            i += 1
+            continue
 
-            # *** Tolerancia vertical más amplia para BOFA y similares ***
-            rows = []
-            tol = 4.5  # (antes 2.5)
-            for w in words:
-                all_text.append(w["text"])
-                if not rows:
-                    rows.append({"top": w["top"], "words": [w]})
-                else:
-                    if abs(w["top"] - rows[-1]["top"]) <= tol:
-                        rows[-1]["words"].append(w)
-                    else:
-                        rows.append({"top": w["top"], "words": [w]})
+        # 2) Armar bloque de descripción desde esta línea hasta capturar un monto
+        desc_parts = [line]
+        amount: Optional[float] = None
 
-            # detectar columna de montos (x0 de tokens monetarios, hacia la derecha)
-            for r in rows:
-                for w in r["words"]:
-                    if MONEY_RE.match(norm(w["text"])):
-                        amount_xs.append(w["x0"])
+        # intenta monto en misma línea (si hay 2 números, tomamos el que tenga signo/() o el primero)
+        tokens_here = RE_AMOUNT_ANY.findall(line)
+        amount = pick_amount_from_tokens(tokens_here)
 
-            pages_rows.append(rows)
+        j = i + 1
+        # si no lo encontramos, buscamos en las 1–3 líneas siguientes (típico BOFA: monto solo en la línea de abajo)
+        while amount is None and j < n and j <= i + 3:
+            nxt = lines[j]
+            # si la siguiente línea ya empieza con fecha, paramos (no hubo monto para este bloque)
+            if RE_DATE_SLASH.match(nxt) or RE_DATE_LONG.search(nxt):
+                break
+            tokens_next = RE_AMOUNT_ANY.findall(nxt)
+            # si la línea ES solo el monto, guardamos y no metemos ese texto en la descripción
+            if tokens_next and nxt.strip() == tokens_next[0]:
+                amount = pick_amount_from_tokens(tokens_next)
+                j += 1
+                break
+            # si trae texto + monto, concatenamos y tomamos monto
+            if tokens_next:
+                amount = pick_amount_from_tokens(tokens_next)
+                desc_parts.append(nxt)
+                j += 1
+                break
+            # solo texto de continuación
+            desc_parts.append(nxt)
+            j += 1
 
-        text_blob = "\n".join(norm(x) for x in all_text)
-        period = detect_period(text_blob)
+        # si hay 2 importes en la misma línea (monto+balance), ya lo resolvimos arriba con pick_amount_from_tokens
 
-        right_x = statistics.median(amount_xs) if amount_xs else None
+        if amount is not None:
+            # limpiar descripción: quitar el token de monto si quedó pegado al final
+            desc = " ".join(desc_parts).strip()
+            # si la última parte es "123.45" sola, probablemente ya la excluimos,
+            # pero por si acaso, borramos el último token de monto al final.
+            desc = re.sub(r"\s*\(?-?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})\)?\s*$", "", desc).strip()
 
-        # 2) Segmentar transacciones: fila con fecha inicia bloque; acumular hasta hallar monto
-        txs = []
-        current = None
+            txs.append({
+                "date": date_iso,
+                "description": desc,
+                "amount": float(amount),
+            })
 
-        def flush_current():
-            nonlocal current
-            if not current:
-                return
-            rawtxt = " ".join(current["strings"]).strip()
-            if should_ignore(rawtxt.upper()):
-                current = None
-                return
-
-            # monto (si aún no lo capturamos)
-            if current.get("amount") is None and current.get("rows"):
-                for r in current["rows"]:
-                    row_text = " ".join([norm(w["text"]) for w in r["words"]])
-                    amt = to_amount_token(row_text, right_x, r["words"])
-                    if amt is not None:
-                        current["amount"] = amt
-                        break
-
-            # fecha (si aún no la tenemos)
-            date_iso = current.get("date")
-            if not date_iso:
-                joined = rawtxt
-                m = DATE_MMDD_RE.search(joined)
-                if m:
-                    fb_year = int(period["end"].split("-")[0]) if period else datetime.utcnow().year
-                    date_iso = parse_mmdd(m.group(0), fb_year)
-                else:
-                    date_iso = parse_long_date(joined)
-
-            if date_iso and in_period(date_iso, period) and current.get("amount") is not None:
-                amt = float(current["amount"])
-                desc = rawtxt
-                txs.append({
-                    "date": date_iso,
-                    "description": desc,
-                    "amount": amt,
-                    "currency": "USD",
-                    "direction": classify_direction(desc, amt),
-                    "channel": classify_channel(desc),
-                    "counterparty": extract_counterparty(desc),
-                    "bank_ref": extract_ref(desc)
-                })
-            current = None
-
-        for rows in pages_rows:
-            for r in rows:
-                row_text = " ".join(norm(w["text"]) for w in r["words"]).strip()
-                if not row_text:
-                    continue
-
-                # ¿comienza con fecha corta?
-                m = DATE_MMDD_RE.match(row_text)
-                starts_with_date = bool(m)
-                # ¿o con fecha larga (Wise/Mercury)?
-                starts_with_long = bool(LONG_EN_RE.search(row_text) or LONG_ES1_RE.search(row_text))
-
-                if starts_with_date:
-                    flush_current()
-                    yy = m.group(3)
-                    fb_year = int(period["end"].split("-")[0]) if (period and period.get("end")) else datetime.utcnow().year
-                    date_iso = parse_mmdd(m.group(0), fb_year)
-                    current = {"date": date_iso, "strings": [row_text], "rows": [r], "amount": None}
-                    amt = to_amount_token(row_text, right_x, r["words"])
-                    if amt is not None:
-                        current["amount"] = amt
-                        flush_current()
-                elif starts_with_long:
-                    flush_current()
-                    date_iso = parse_long_date(row_text)
-                    current = {"date": date_iso, "strings": [row_text], "rows": [r], "amount": None}
-                    amt = to_amount_token(row_text, right_x, r["words"])
-                    if amt is not None:
-                        current["amount"] = amt
-                        flush_current()
-                else:
-                    if current:
-                        current["strings"].append(row_text)
-                        current["rows"].append(r)
-                        if current.get("amount") is None:
-                            amt = to_amount_token(row_text, right_x, r["words"])
-                            if amt is not None:
-                                current["amount"] = amt
-                                # flush aquí para evitar absorber la próxima fecha
-                                flush_current()
-
-        flush_current()
-
-        # --------- Fallback textual BOFA si no se detectó por layout ---------
-        if not txs and re.search(r"Bank of America", text_blob, re.I):
-            linear_pages = []
-            buf.seek(0)
-            with pdfplumber.open(buf) as pdf2:
-                for p in pdf2.pages:
-                    linear_pages.append(p.extract_text(x_tolerance=3, y_tolerance=3) or "")
-            linear = "\n".join(linear_pages)
-
-            lines = [norm(x) for x in linear.split("\n")]
-            results = []
-            current_bofa = None
-            fb_year = int(period["end"].split("-")[0]) if period else datetime.utcnow().year
-
-            for ln in lines:
-                if re.match(r"^\d{2}/\d{2}/\d{2,4}\b", ln):
-                    if current_bofa and "amount" in current_bofa:
-                        results.append(current_bofa)
-                    ds = re.match(r"^(\d{2}/\d{2}/\d{2,4})\s+(.*)$", ln)
-                    if ds:
-                        current_bofa = {
-                            "date": parse_mmdd(ds.group(1), fb_year),
-                            "desc": ds.group(2).strip()
-                        }
-                    else:
-                        current_bofa = None
-                else:
-                    if current_bofa:
-                        m_amt = re.search(r"(-?\d{1,3}(?:,\d{3})*\.\d{2})$", ln)
-                        if m_amt and "amount" not in current_bofa:
-                            amt = float(m_amt.group(1).replace(",", ""))
-                            current_bofa["amount"] = amt
-                        else:
-                            if ln and not re.match(r"^(Deposits and other credits|Withdrawals and other debits|Service fees|Total )", ln, re.I):
-                                current_bofa["desc"] += " " + ln
-
-            if current_bofa and "amount" in current_bofa:
-                results.append(current_bofa)
-
-            for r in results:
-                if not r.get("date") or not in_period(r.get("date"), period):
-                    continue
-                amt = float(r["amount"])
-                desc = r["desc"].strip()
-                txs.append({
-                    "date": r["date"],
-                    "description": desc,
-                    "amount": amt,
-                    "currency": "USD",
-                    "direction": classify_direction(desc, amt),
-                    "channel": classify_channel(desc),
-                    "counterparty": extract_counterparty(desc),
-                    "bank_ref": extract_ref(desc)
-                })
+            i = j  # saltamos a lo que quedó después del bloque
+        else:
+            # No se encontró monto para este bloque: lo descartamos (no queremos falsos positivos)
+            i += 1
 
     return txs
+
+# ── endpoint ──────────────────────────────────────────────────────────────────
+@app.post("/parse")
+async def parse_pdf(file: UploadFile = File(...)) -> List[Dict[str, Any]]:
+    pdf_bytes = await file.read()
+    return parse_transactions_minimal(pdf_bytes)
