@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 import pdfplumber
 
-# Regex estricto para montos: siempre con 2 decimales, con $ o separadores de miles o signo/paréntesis
+# Regex estricto para montos: requiere 2 decimales, admite $, separadores, signo o paréntesis
 RE_AMOUNT = re.compile(r"\(?-?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})\)?-?")
 RE_DATE_SLASH = re.compile(r"^\s*(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")
 RE_DATE_LONG  = re.compile(r"\b([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})\b", re.I)
@@ -17,6 +17,12 @@ MONTHS = {
 
 def norm(s: str) -> str:
     return (s or "").replace("\u00A0", " ").replace("–", "-").replace("—", "-").replace("−", "-").strip()
+
+def ensure_utf8(x):
+    """Compatibilidad: convierte bytes o str en str utf-8 seguro"""
+    if isinstance(x, bytes):
+        return x.decode("utf-8", errors="ignore")
+    return str(x)
 
 def extract_full_text(pdf) -> str:
     return "\n".join(p.extract_text(x_tolerance=2, y_tolerance=3) or "" for p in pdf.pages)
