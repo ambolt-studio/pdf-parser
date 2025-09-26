@@ -78,4 +78,3 @@ def parse_valley(lines: List[str], fallback_year: int) -> List[Dict[str, Any]]:
         })
 
     return results
-
