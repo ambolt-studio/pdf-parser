@@ -2,6 +2,9 @@ import re
 from typing import List, Dict, Any
 from .base import BaseBankParser, extract_lines, detect_year, RE_AMOUNT, parse_mmdd_token
 
+KEYWORDS_IN = ["deposit", "credit", "zelle from", "interest", "incoming"]
+KEYWORDS_OUT = ["withdraw", "purchase", "debit", "fee", "svc charge", "zelle to", "payment to", "transfer"]
+
 class WFParser(BaseBankParser):
     key = "wf"
 
@@ -11,41 +14,52 @@ class WFParser(BaseBankParser):
         results: List[Dict[str, Any]] = []
 
         for line in lines:
-            # buscamos fecha al inicio
             date = parse_mmdd_token(line, year)
             if not date:
                 continue
 
-            # limpiamos espacios duplicados
-            parts = re.split(r"\s{2,}", line.strip())
-            if len(parts) < 2:
+            # Normalizamos texto
+            text = line.strip()
+            amounts = [a for a in RE_AMOUNT.findall(text)]
+
+            if not amounts:
                 continue
 
-            # parts típicamente: [fecha+desc, credits?, debits?, ending?]
-            desc = parts[0]
-            credit, debit = None, None
+            # Limpiamos y convertimos
+            nums = []
+            for a in amounts:
+                clean = a.replace("$", "").replace(",", "").replace("(", "").replace(")", "").strip("-")
+                try:
+                    val = float(clean)
+                    nums.append(val)
+                except:
+                    pass
 
-            if len(parts) >= 2 and re.match(RE_AMOUNT, parts[1]):
-                credit = parts[1]
-            if len(parts) >= 3 and re.match(RE_AMOUNT, parts[2]):
-                debit = parts[2]
+            if not nums:
+                continue
 
-            amount = None
+            # Regla: si hay 2+ montos, el último suele ser balance
+            if len(nums) > 1:
+                amt = nums[0]
+            else:
+                amt = nums[0]
+
+            # Determinar dirección por keywords
+            lower = text.lower()
             direction = "unknown"
-            if credit:
-                amount = float(credit.replace(",", ""))
+            if any(k in lower for k in KEYWORDS_IN):
                 direction = "in"
-            elif debit:
-                amount = float(debit.replace(",", ""))
+            elif any(k in lower for k in KEYWORDS_OUT):
                 direction = "out"
 
-            if amount is None:
-                continue
+            # fallback si no hubo match
+            if direction == "unknown":
+                direction = "in" if amt > 0 else "out"
 
             results.append({
                 "date": date,
-                "description": desc,
-                "amount": amount,
+                "description": text,
+                "amount": amt,
                 "direction": direction
             })
 
