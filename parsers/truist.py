@@ -1,105 +1,63 @@
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
+from .base import GenericParser
 
-# patrones básicos
-RE_DATE = re.compile(r"\b(\d{1,2}/\d{1,2})\b")   # mm/dd
-RE_AMOUNT = re.compile(r"[-]?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})")
-
-TRUIST_DESC_STOPWORDS = [
-    "total deposits", "total other", "effective", "truist", "questions", "comments",
-    "service charges", "if you", "memberfdic"
-]
-
-def normalize_line(line: str) -> str:
-    return line.replace("\u00A0", " ").replace("–", "-").replace("—", "-").strip()
-
-def split_multi_date_lines(lines: List[str]) -> List[str]:
+class TruistParser(GenericParser):
     """
-    Si una línea contiene varias fechas (ej. 05/07 ... 05/12 ...),
-    se parte en sublíneas para que cada transacción quede aislada.
+    Parser específico para estados de cuenta de Truist.
+    Hereda de GenericParser.
     """
-    new_lines = []
-    for ln in lines:
-        dates = list(RE_DATE.finditer(ln))
-        if len(dates) > 1:
-            starts = [d.start() for d in dates] + [len(ln)]
-            for i in range(len(starts) - 1):
-                chunk = ln[starts[i]:starts[i+1]].strip()
-                if chunk:
-                    new_lines.append(chunk)
-        else:
-            new_lines.append(ln)
-    return new_lines
 
-def extract_amount_and_direction(text: str) -> Optional[Dict[str, Any]]:
-    """
-    Busca el primer monto en el texto y determina dirección (in/out).
-    """
-    m = RE_AMOUNT.search(text)
-    if not m:
-        return None
-    raw = m.group()
-    amt = float(raw.replace("$", "").replace(",", ""))
-    if raw.startswith("(") or raw.startswith("-"):
-        amt = -abs(amt)
+    RE_DATE = re.compile(r"\b(\d{2}/\d{2})\b")
+    RE_AMOUNT = re.compile(r"[-]?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})")
 
-    desc_low = text.lower()
-    if "fee" in desc_low or "debit" in desc_low or "out" in desc_low or amt < 0:
-        direction = "out"
-    elif "in" in desc_low or "credit" in desc_low or amt > 0:
-        direction = "in"
-    else:
-        direction = "unknown"
+    def parse(self, lines: List[str], fallback_year: int) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        buffer = []
 
-    return {"amount": abs(amt), "direction": direction}
+        for ln in lines:
+            ln = self.normalize_line(ln)
+            if not ln:
+                continue
 
-def clean_truist_description(desc: str) -> str:
-    """
-    Recorta la descripción para evitar que agarre disclaimers o resúmenes.
-    """
-    text_low = desc.lower()
+            # Detectar fecha → inicio de transacción
+            if self.RE_DATE.search(ln):
+                if buffer:
+                    tx = self._process_tx(" ".join(buffer), fallback_year)
+                    if tx:
+                        results.append(tx)
+                buffer = [ln]
+            else:
+                buffer.append(ln)
 
-    cut_points = []
-    for w in TRUIST_DESC_STOPWORDS:
-        idx = text_low.find(w)
-        if idx != -1:
-            cut_points.append(idx)
+        # último bloque
+        if buffer:
+            tx = self._process_tx(" ".join(buffer), fallback_year)
+            if tx:
+                results.append(tx)
 
-    if cut_points:
-        first_cut = min(cut_points)
-        desc = desc[:first_cut]
+        return results
 
-    if "=" in desc:
-        desc = desc.split("=")[0]
-
-    return " ".join(desc.strip().split())
-
-def parse_truist(lines: List[str], fallback_year: int) -> List[Dict[str, Any]]:
-    """
-    Parser específico para Truist.
-    """
-    results: List[Dict[str, Any]] = []
-    lines = [normalize_line(ln) for ln in lines if ln.strip()]
-    lines = split_multi_date_lines(lines)
-
-    for ln in lines:
-        m_date = RE_DATE.search(ln)
+    def _process_tx(self, text: str, year: int) -> Dict[str, Any] | None:
+        m_date = self.RE_DATE.search(text)
         if not m_date:
-            continue
+            return None
 
         mm, dd = m_date.group(1).split("/")
-        yyyy = fallback_year
-        date_iso = f"{yyyy:04d}-{int(mm):02d}-{int(dd):02d}"
+        date_iso = f"{year:04d}-{int(mm):02d}-{int(dd):02d}"
 
-        amt_info = extract_amount_and_direction(ln)
+        amt_info = self.extract_amount_and_direction(text, self.RE_AMOUNT)
         if not amt_info:
-            continue
+            return None
 
-        results.append({
+        # recortar descripción para evitar meter todo el boilerplate
+        desc = text.split("Total deposits", 1)[0]  # corta donde empieza el bloque largo
+        desc = desc.split("Total other withdrawals", 1)[0]
+        desc = desc.strip()
+
+        return {
             "date": date_iso,
-            "description": clean_truist_description(ln),
+            "description": desc,
             "amount": amt_info["amount"],
-            "direction": amt_info["direction"]
-        })
-
-    return results
+            "direction": amt_info["direction"],
+        }
