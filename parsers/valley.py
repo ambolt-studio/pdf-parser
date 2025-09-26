@@ -1,9 +1,16 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 import re
-import pdfplumber
 import io
+import pdfplumber
 
 from .base import BaseBankParser, detect_year, parse_mmdd_token, pick_amount
+
+# Regex para capturar transacciones Valley:
+# fecha + descripción + importe real + balance
+RE_VALLEY_TX = re.compile(
+    r"(\d{1,2}/\d{1,2})\s+(.*?)\s+(-?\$[\d,]+\.\d{2})\s+\$[\d,]+\.\d{2}",
+    re.DOTALL
+)
 
 # Patrones para ignorar filas de resumen
 IGNORE_PATTERNS = [
@@ -11,11 +18,8 @@ IGNORE_PATTERNS = [
     r"Ending Balance",
     r"Statement Ending",
     r"SUMMARY FOR THE PERIOD",
-    r"Account Number",
-    r"Page \d+ of \d+",
-    r"TRANSACTIONS",
-    r"Withdrawals & Other Debits",
     r"Deposits & Other Credits",
+    r"Withdrawals & Other Debits",
 ]
 IGNORE_RE = re.compile("|".join(IGNORE_PATTERNS), re.I)
 
@@ -24,62 +28,36 @@ class ValleyParser(BaseBankParser):
     key = "valley"
 
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
-        y = detect_year(full_text)
+        year = detect_year(full_text)
         txs: List[Dict[str, Any]] = []
 
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page in pdf.pages:
-                words = page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=True)
+                text = page.extract_text(x_tolerance=2, y_tolerance=3) or ""
+                for m in RE_VALLEY_TX.finditer(text):
+                    raw_date, raw_desc, raw_amount = m.groups()
 
-                # Agrupamos palabras por fila según coordenada Y
-                rows: Dict[int, List[dict]] = {}
-                for w in words:
-                    row_key = int(w["top"])  # usamos la coordenada Y como agrupador
-                    rows.setdefault(row_key, []).append(w)
-
-                for row in sorted(rows.values(), key=lambda r: r[0]["top"]):
-                    texts = [w["text"] for w in sorted(row, key=lambda w: w["x0"])]
-                    line = " ".join(texts).strip()
-
-                    if IGNORE_RE.search(line):
+                    if IGNORE_RE.search(raw_desc):
                         continue
 
-                    # Buscamos fecha al inicio
-                    date_iso: Optional[str] = None
-                    for token in texts[:2]:  # las primeras palabras suelen contener la fecha
-                        date_iso = parse_mmdd_token(token, y)
-                        if date_iso:
-                            break
+                    # Fecha en ISO
+                    date_iso = parse_mmdd_token(raw_date, year)
                     if not date_iso:
                         continue
 
-                    # El último token es el balance, lo ignoramos
-                    if not texts:
-                        continue
-                    tokens_no_balance = texts[:-1]
-
-                    # Buscamos monto en los tokens restantes (debe tener $ o signo)
-                    amount_token = None
-                    for t in reversed(tokens_no_balance):
-                        if re.search(r"[\$\-\(\)]", t):
-                            amount_token = t
-                            break
-
-                    if not amount_token:
-                        continue
-
-                    amount = pick_amount([amount_token], prefer_first=True)
+                    # Monto (positivo/negativo según signo)
+                    amount = pick_amount([raw_amount], prefer_first=True)
                     if amount is None:
                         continue
 
-                    # Descripción = todo excepto fecha y monto
-                    desc_tokens = [t for t in tokens_no_balance if t != amount_token]
-                    desc = " ".join(desc_tokens).strip()
+                    # Descripción limpia
+                    desc = " ".join(raw_desc.split())
 
                     txs.append({
                         "date": date_iso,
                         "description": desc,
-                        "amount": amount
+                        "amount": amount,
                     })
 
         return txs
+
