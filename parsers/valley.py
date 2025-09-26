@@ -1,107 +1,46 @@
-import pdfplumber
+import re
 from typing import List, Dict, Any
+from .base import BaseBankParser, extract_lines, parse_mmdd_token, RE_AMOUNT, pick_amount, clean_desc_remove_amount
 
-
-class ValleyParser:
+class ValleyParser(BaseBankParser):
     key = "valley"
 
-    def __init__(self, pdf_path: str, fallback_year: int):
-        self.pdf_path = pdf_path
-        self.fallback_year = fallback_year
+    def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
+        lines = extract_lines(pdf_bytes)
+        year = self.infer_year(full_text)
 
-    def parse(self) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
-        with pdfplumber.open(self.pdf_path) as pdf:
-            for page in pdf.pages:
-                words = page.extract_words(
-                    x_tolerance=3,
-                    y_tolerance=3,
-                    keep_blank_chars=True
-                )
-                rows = self._group_by_line(words)
+        i, n = 0, len(lines)
 
-                for row in rows:
-                    date, desc, amount, balance = row
-                    if not date or not amount:
-                        continue
+        while i < n:
+            line = lines[i]
+            date = parse_mmdd_token(line, year)
+            if not date:
+                i += 1
+                continue
 
-                    try:
-                        mm, dd = date.split("/")
-                        yyyy = self.fallback_year
-                        date_iso = f"{yyyy:04d}-{int(mm):02d}-{int(dd):02d}"
-                    except Exception:
-                        continue
+            # armar bloque hasta próxima fecha
+            block = [line]
+            j = i + 1
+            while j < n and not parse_mmdd_token(lines[j], year):
+                if len(lines[j]) > 250:
+                    break
+                block.append(lines[j])
+                j += 1
 
-                    # limpiar monto
-                    amount_val = float(
-                        amount.replace("$", "")
-                              .replace(",", "")
-                              .replace("-", "")
-                    )
+            text = " ".join(block)
+            amts = RE_AMOUNT.findall(text)
+            amt = pick_amount(amts, prefer_first=True)
 
-                    # determinar dirección
-                    direction = "in"
-                    if "-" in amount or "fee" in desc.lower() or "debit" in desc.lower() or "out" in desc.lower():
-                        direction = "out"
+            if amt is not None:
+                desc = clean_desc_remove_amount(text)
+                results.append({
+                    "date": date,
+                    "description": desc,
+                    "amount": abs(amt),
+                    "direction": "out" if amt < 0 else "in"
+                })
 
-                    results.append({
-                        "date": date_iso,
-                        "description": desc.strip(),
-                        "amount": amount_val,
-                        "direction": direction
-                    })
+            i = j
 
         return results
-
-    def _group_by_line(self, words):
-        """
-        Agrupa palabras por coordenada Y y devuelve filas [date, desc, amount, balance].
-        """
-        rows = []
-        current_y = None
-        current_row = []
-
-        for w in words:
-            if current_y is None:
-                current_y = w["top"]
-
-            # salto de línea si cambia demasiado la coordenada Y
-            if abs(w["top"] - current_y) > 3:
-                if current_row:
-                    rows.append(self._row_to_fields(current_row))
-                current_row = [w]
-                current_y = w["top"]
-            else:
-                current_row.append(w)
-
-        if current_row:
-            rows.append(self._row_to_fields(current_row))
-
-        return rows
-
-    def _row_to_fields(self, row_words):
-        """
-        Convierte palabras de una fila en [date, desc, amount, balance].
-        """
-        texts = [w["text"] for w in row_words]
-        if not texts:
-            return [None, None, None, None]
-
-        # primera palabra suele ser la fecha
-        date = texts[0] if "/" in texts[0] else None
-
-        # último valor suele ser el balance
-        balance = texts[-1] if "$" in texts[-1] or texts[-1].replace(",", "").replace(".", "").isdigit() else None
-
-        # buscar el penúltimo valor como monto
-        amount = None
-        for t in texts[::-1]:
-            if "$" in t or t.replace(",", "").replace(".", "").replace("-", "").isdigit():
-                amount = t
-                break
-
-        # lo que queda en el medio es la descripción
-        desc_parts = [t for t in texts if t not in [date, amount, balance]]
-        desc = " ".join(desc_parts)
-
-        return [date, desc, amount, balance]
