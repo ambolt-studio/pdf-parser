@@ -1,48 +1,72 @@
-from typing import List, Dict, Any
 import re
-from .base import BaseBankParser, extract_lines, detect_year, parse_mmdd_token, parse_long_date, parse_mmmdd, RE_AMOUNT, pick_amount, clean_desc_remove_amount
-
-IGNORE_PATTERNS = [
-    r"Statement period activity summary",
-    r"Beginning balance on",
-    r"Ending balance on",
-    r"Page \d+ of \d+",
-]
+from typing import List, Dict, Any
+from .base import (
+    BaseBankParser,
+    extract_lines,
+    detect_year,
+    parse_mmdd_token,
+    RE_AMOUNT,
+    pick_amount,
+    clean_desc_remove_amount,
+)
 
 class WFParser(BaseBankParser):
     key = "wf"
 
+    COL_DEPOSITS = re.compile(r"Deposits/.*Credits", re.I)
+    COL_WITHDRAWALS = re.compile(r"(Withdrawals|Debits)", re.I)
+
+    KW_OUT = re.compile(r"(fee|charge|svc charge|withdrawal|debit|ach|bill pay)", re.I)
+    KW_IN = re.compile(r"(deposit|credit|interest)", re.I)
+
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
-        y = detect_year(full_text)
         lines = extract_lines(pdf_bytes)
-        txs: List[Dict[str, Any]] = []
-        i, n = 0, len(lines)
+        year = detect_year(full_text)
 
-        def ign(s: str) -> bool:
-            return any(re.search(p, s, flags=re.I) for p in IGNORE_PATTERNS)
+        results: List[Dict[str, Any]] = []
+        section = None
 
-        while i < n:
-            line = lines[i]
-            if ign(line):
-                i += 1; continue
+        for ln in lines:
+            # detectar sección de tabla
+            if self.COL_DEPOSITS.search(ln):
+                section = "in"
+                continue
+            if self.COL_WITHDRAWALS.search(ln):
+                section = "out"
+                continue
 
-            date = parse_mmdd_token(line, y) or parse_long_date(line) or parse_mmmdd(line, y)
+            date = parse_mmdd_token(ln, year)
             if not date:
-                i += 1; continue
+                continue
 
-            block = [line]; j = i+1
-            while j < n and not (parse_mmdd_token(lines[j], y) or parse_long_date(lines[j]) or parse_mmmdd(lines[j], y)):
-                if not ign(lines[j]):
-                    block.append(lines[j])
-                j += 1
-
-            text = " ".join(block)
-            amts = RE_AMOUNT.findall(text)
-            # WF: primer token suele ser el monto de la transacción (cargos: “Wire Trans Svc Charge 25.00”)
+            amts = RE_AMOUNT.findall(ln)
             amt = pick_amount(amts, prefer_first=True)
-            if amt is not None:
-                desc = clean_desc_remove_amount(text)
-                txs.append({"date": date, "description": desc, "amount": amt})
-            i = j
+            if amt is None:
+                continue
 
-        return txs
+            desc = clean_desc_remove_amount(ln)
+
+            # determinar dirección
+            direction = "unknown"
+            if section == "in":
+                direction = "in"
+            elif section == "out":
+                direction = "out"
+            else:
+                if self.KW_OUT.search(desc):
+                    direction = "out"
+                elif self.KW_IN.search(desc):
+                    direction = "in"
+                elif "interest" in desc.lower():
+                    direction = "in"
+                else:
+                    direction = "in" if amt > 0 else "out"
+
+            results.append({
+                "date": date,
+                "description": desc,
+                "amount": abs(amt),
+                "direction": direction
+            })
+
+        return results
