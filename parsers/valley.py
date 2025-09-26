@@ -1,19 +1,14 @@
 from typing import List, Dict, Any, Optional
 import re
+import pdfplumber
+import io
 
-from .base import (
-    BaseBankParser,
-    extract_lines,
-    detect_year,
-    parse_mmdd_token,
-    RE_AMOUNT,
-    pick_amount,
-)
+from .base import BaseBankParser, detect_year, parse_mmdd_token, pick_amount
 
-# Patrones de ruido que no deben contarse como movimientos
+# Patrones para ignorar filas de resumen
 IGNORE_PATTERNS = [
-    r"Beginning balance",
-    r"Ending balance",
+    r"Beginning Balance",
+    r"Ending Balance",
     r"Statement Ending",
     r"SUMMARY FOR THE PERIOD",
     r"Account Number",
@@ -22,75 +17,69 @@ IGNORE_PATTERNS = [
     r"Withdrawals & Other Debits",
     r"Deposits & Other Credits",
 ]
-
 IGNORE_RE = re.compile("|".join(IGNORE_PATTERNS), re.I)
 
-# Fecha mm/dd al inicio
-RE_DATE_START = re.compile(r"\b\d{1,2}/\d{1,2}\b")
-
-# Usamos esto para cortar varias transacciones en una sola línea
-SPLIT_ON_DATES = re.compile(r"(?=(?:^|\s)(\d{1,2}/\d{1,2}))")
-
-def clean_description(desc: str) -> str:
-    # Quitamos montos ($…) al final o balances que se cuelen
-    desc = re.sub(r"\s*"+RE_AMOUNT.pattern+r"\s*", " ", desc).strip()
-    return re.sub(r"\s+", " ", desc)
 
 class ValleyParser(BaseBankParser):
     key = "valley"
 
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
         y = detect_year(full_text)
-        raw_lines = extract_lines(pdf_bytes)
-
-        # 1) Filtramos líneas de ruido
-        useful_lines = [ln for ln in raw_lines if not IGNORE_RE.search(ln)]
-
-        # 2) Expandimos líneas que contienen varias fechas
-        expanded: List[str] = []
-        for ln in useful_lines:
-            parts = [p.strip() for p in SPLIT_ON_DATES.split(ln) if p.strip()]
-            # reconstruimos asegurando que las fechas no se pierdan
-            buff = ""
-            for part in parts:
-                if RE_DATE_START.search(part):
-                    if buff:
-                        expanded.append(buff.strip())
-                    buff = part
-                else:
-                    buff += " " + part
-            if buff:
-                expanded.append(buff.strip())
-
         txs: List[Dict[str, Any]] = []
 
-        # 3) Procesamos cada bloque
-        for seg in expanded:
-            if not RE_DATE_START.match(seg):
-                continue
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                words = page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=True)
 
-            date_iso: Optional[str] = parse_mmdd_token(seg, y)
-            if not date_iso:
-                continue
+                # Agrupamos palabras por fila según coordenada Y
+                rows: Dict[int, List[dict]] = {}
+                for w in words:
+                    row_key = int(w["top"])  # usamos la coordenada Y como agrupador
+                    rows.setdefault(row_key, []).append(w)
 
-            # Extraemos importes con símbolo $
-            amounts = [a for a in RE_AMOUNT.findall(seg) if "$" in a]
-            if not amounts:
-                continue
+                for row in sorted(rows.values(), key=lambda r: r[0]["top"]):
+                    texts = [w["text"] for w in sorted(row, key=lambda w: w["x0"])]
+                    line = " ".join(texts).strip()
 
-            # El primer monto con $ es el válido (los siguientes son balances)
-            amount = pick_amount([amounts[0]], prefer_first=True)
-            if amount is None:
-                continue
+                    if IGNORE_RE.search(line):
+                        continue
 
-            # Descripción limpia
-            desc = clean_description(seg)
+                    # Buscamos fecha al inicio
+                    date_iso: Optional[str] = None
+                    for token in texts[:2]:  # las primeras palabras suelen contener la fecha
+                        date_iso = parse_mmdd_token(token, y)
+                        if date_iso:
+                            break
+                    if not date_iso:
+                        continue
 
-            txs.append({
-                "date": date_iso,
-                "description": desc,
-                "amount": amount
-            })
+                    # El último token es el balance, lo ignoramos
+                    if not texts:
+                        continue
+                    tokens_no_balance = texts[:-1]
+
+                    # Buscamos monto en los tokens restantes (debe tener $ o signo)
+                    amount_token = None
+                    for t in reversed(tokens_no_balance):
+                        if re.search(r"[\$\-\(\)]", t):
+                            amount_token = t
+                            break
+
+                    if not amount_token:
+                        continue
+
+                    amount = pick_amount([amount_token], prefer_first=True)
+                    if amount is None:
+                        continue
+
+                    # Descripción = todo excepto fecha y monto
+                    desc_tokens = [t for t in tokens_no_balance if t != amount_token]
+                    desc = " ".join(desc_tokens).strip()
+
+                    txs.append({
+                        "date": date_iso,
+                        "description": desc,
+                        "amount": amount
+                    })
 
         return txs
-
