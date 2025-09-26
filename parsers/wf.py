@@ -132,24 +132,35 @@ def _determine_direction(description: str) -> str:
     ]):
         return "in"
     
-    # 3) Zelle específico: solo "from" es entrada, "to" es salida
+    # 3) Patrones "From" - dinero que viene DE una entidad (entrada)
+    if re.search(r"\bfrom\s+\w+", low):
+        # "Wise US Inc Acrux Glob 241106 Acrux Glob From Acrux Global Logistics LLC Via Wise"
+        # "From Acrux Global" indica que el dinero viene de Acrux Global → entrada
+        return "in"
+    
+    # 4) Pagos recibidos - Company Payment patterns
+    if re.search(r"\w+\s+company\s+payment", low) or re.search(r"\bpayment\s+\w+\s+\d+", low):
+        # "Lafeber Company Payment Nov 24" → pago recibido de la empresa
+        return "in"
+    
+    # 5) Zelle específico: solo "from" es entrada, "to" es salida
     if "zelle from" in low:
         return "in"
     elif "zelle to" in low:
         return "out"
     
-    # 4) Wire transfers que no tienen /Org= o /Bnf= 
+    # 6) Wire transfers que no tienen /Org= o /Bnf= 
     if re.search(r"\bwt\s+\w+", low) and "morgan stanley" in low:
         return "in"
     
-    # 5) Otros patrones de entrada muy específicos
+    # 7) Otros patrones de entrada muy específicos
     if any(pattern in low for pattern in [
         "interest payment", "interest credit", "deposit", 
         "credit" # pero no "credit card"
     ]) and "credit card" not in low:
         return "in"
     
-    # 6) Todo lo demás es salida (incluye purchases, payments, fees, dues, etc.)
+    # 8) Todo lo demás es salida (incluye purchases, payments, fees, dues, etc.)
     return "out"
 
 class WFParser(BaseBankParser):
