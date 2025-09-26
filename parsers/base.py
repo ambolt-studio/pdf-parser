@@ -89,8 +89,13 @@ def clean_desc_remove_amount(desc: str) -> str:
 
 class BaseBankParser:
     key = "generic"
+
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
         raise NotImplementedError
+
+    def infer_year(self, full_text: str) -> int:
+        """Compatibilidad con parsers que llaman a self.infer_year()"""
+        return detect_year(full_text)
 
 class GenericParser(BaseBankParser):
     key = "generic"
