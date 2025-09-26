@@ -3,8 +3,8 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 import pdfplumber
 
-# Tokens de importe (muy robusto: acepta -, —, −, $ delante o - detrás, y paréntesis)
-RE_AMOUNT = re.compile(r"\(?[−\-—–]?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})?\)?\-?")
+# Regex estricto para montos: siempre con 2 decimales, con $ o separadores de miles o signo/paréntesis
+RE_AMOUNT = re.compile(r"\(?-?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})\)?-?")
 RE_DATE_SLASH = re.compile(r"^\s*(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")
 RE_DATE_LONG  = re.compile(r"\b([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})\b", re.I)
 RE_DATE_MMMDD = re.compile(r"^\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+(\d{1,2})\b", re.I)
@@ -15,17 +15,11 @@ MONTHS = {
     "jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,"jul":7,"aug":8,"sep":9,"sept":9,"oct":10,"nov":11,"dec":12
 }
 
-def ensure_utf8(_: bytes) -> None:
-    return
-
 def norm(s: str) -> str:
     return (s or "").replace("\u00A0", " ").replace("–", "-").replace("—", "-").replace("−", "-").strip()
 
 def extract_full_text(pdf) -> str:
-    blobs = []
-    for p in pdf.pages:
-        blobs.append(p.extract_text(x_tolerance=2, y_tolerance=3) or "")
-    return "\n".join(blobs)
+    return "\n".join(p.extract_text(x_tolerance=2, y_tolerance=3) or "" for p in pdf.pages)
 
 def extract_lines(pdf_bytes: bytes) -> List[str]:
     lines = []
@@ -71,7 +65,6 @@ def parse_mmmdd(s: str, fallback_year: int) -> Optional[str]:
 def pick_amount(tokens: List[str], prefer_first=True) -> Optional[float]:
     if not tokens: return None
     tok = tokens[0] if prefer_first else (next((t for t in tokens if "-" in t or "(" in t), tokens[0]))
-    # normalizo signos
     neg = tok.endswith("-") or tok.startswith("-") or tok.startswith("(")
     tok = tok.replace("(", "").replace(")", "").replace("-", "").replace("$", "").replace(",", "")
     try:
@@ -91,28 +84,23 @@ class BaseBankParser:
 class GenericParser(BaseBankParser):
     key = "generic"
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
-        # Fallback robusto: blocks desde línea con fecha; el primer importe del bloque es el monto (evita balance)
         lines = extract_lines(pdf_bytes)
         y = detect_year(full_text)
         txs: List[Dict[str, Any]] = []
-        i = 0
-        n = len(lines)
+        i, n = 0, len(lines)
         while i < n:
             line = lines[i]
             date = parse_mmdd_token(line, y) or parse_long_date(line) or parse_mmmdd(line, y)
             if not date:
                 i += 1; continue
-            # armo bloque hasta próxima fecha
-            block = [line]
-            j = i+1
+            block = [line]; j = i+1
             while j < n and not (parse_mmdd_token(lines[j], y) or parse_long_date(lines[j]) or parse_mmmdd(lines[j], y)):
                 block.append(lines[j]); j += 1
-            block_text = " ".join(block)
-            amts = RE_AMOUNT.findall(block_text)
-            amt = pick_amount(amts, prefer_first=True)  # PRIMER importe = monto (balance suele venir después)
+            text = " ".join(block)
+            amts = RE_AMOUNT.findall(text)
+            amt = pick_amount(amts, prefer_first=True)
             if amt is not None:
-                # descripción = bloque sin el último token de importe si está pegado al final; de lo contrario, todo el bloque sin recortes
-                desc = clean_desc_remove_amount(block_text)
-                txs.append({"date": date, "description": desc, "amount": abs(amt)})
+                desc = clean_desc_remove_amount(text)
+                txs.append({"date": date, "description": desc, "amount": amt})
             i = j
         return txs
