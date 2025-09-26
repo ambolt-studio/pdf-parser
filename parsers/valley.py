@@ -1,84 +1,78 @@
-import re
-from typing import List, Dict, Any, Optional
-
-RE_DATE = re.compile(r"\b(\d{1,2}/\d{1,2})\b")  # detecta mm/dd
-RE_AMOUNT = re.compile(r"[-]?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})")
-
-
-def normalize_line(line: str) -> str:
-    return line.replace("\u00A0", " ").replace("–", "-").replace("—", "-").strip()
-
-
-def split_multi_date_lines(lines: List[str]) -> List[str]:
-    """Si una línea contiene varias fechas (ej. 12/16 ... 12/16 ...),
-    se parte en sublíneas para que cada transacción quede aislada.
-    """
-    new_lines = []
-    for ln in lines:
-        dates = list(RE_DATE.finditer(ln))
-        if len(dates) > 1:
-            # dividir en segmentos por cada fecha detectada
-            starts = [d.start() for d in dates] + [len(ln)]
-            for i in range(len(starts) - 1):
-                chunk = ln[starts[i]:starts[i+1]].strip()
-                if chunk:
-                    new_lines.append(chunk)
-        else:
-            new_lines.append(ln)
-    return new_lines
-
-
-def extract_amount_and_direction(text: str) -> Optional[Dict[str, Any]]:
-    """Busca el primer monto en el texto y determina direction (in/out)."""
-    m = RE_AMOUNT.search(text)
-    if not m:
-        return None
-    raw = m.group()
-    amt = float(raw.replace("$", "").replace(",", ""))
-    if raw.startswith("(") or raw.startswith("-"):
-        amt = -abs(amt)
-
-    # determinar dirección
-    desc_low = text.lower()
-    if "fee" in desc_low or "debit" in desc_low or "out" in desc_low or amt < 0:
-        direction = "out"
-    elif "in" in desc_low or "credit" in desc_low or amt > 0:
-        direction = "in"
-    else:
-        direction = "unknown"
-
-    return {"amount": abs(amt), "direction": direction}
-
+import pdfplumber
+from typing import List, Dict, Any
 
 class ValleyParser:
     key = "valley"
 
-    def __init__(self, lines: List[str], fallback_year: int):
-        self.lines = [normalize_line(ln) for ln in lines if ln.strip()]
+    def __init__(self, pdf_path: str, fallback_year: int):
+        self.pdf_path = pdf_path
         self.fallback_year = fallback_year
 
     def parse(self) -> List[Dict[str, Any]]:
-        results: List[Dict[str, Any]] = []
-        lines = split_multi_date_lines(self.lines)
+        results = []
+        with pdfplumber.open(self.pdf_path) as pdf:
+            for page in pdf.pages:
+                words = page.extract_words(x_tolerance=3, y_tolerance=3, keep_blank_chars=True)
+                rows = self._group_by_line(words)
 
-        for ln in lines:
-            m_date = RE_DATE.search(ln)
-            if not m_date:
-                continue
+                for row in rows:
+                    date, desc, amount, balance = row
+                    if not date or not amount:
+                        continue
 
-            mm, dd = m_date.group(1).split("/")
-            yyyy = self.fallback_year
-            date_iso = f"{yyyy:04d}-{int(mm):02d}-{int(dd):02d}"
+                    mm, dd = date.split("/")
+                    yyyy = self.fallback_year
+                    date_iso = f"{yyyy:04d}-{int(mm):02d}-{int(dd):02d}"
 
-            amt_info = extract_amount_and_direction(ln)
-            if not amt_info:
-                continue
+                    direction = "in" if "-" not in amount and "fee" not in desc.lower() else "out"
+                    amount_val = float(amount.replace("$", "").replace(",", "").replace("-", ""))
 
-            results.append({
-                "date": date_iso,
-                "description": ln,
-                "amount": amt_info["amount"],
-                "direction": amt_info["direction"],
-            })
-
+                    results.append({
+                        "date": date_iso,
+                        "description": desc,
+                        "amount": amount_val,
+                        "direction": direction
+                    })
         return results
+
+    def _group_by_line(self, words):
+        """Agrupa palabras por su coordenada Y y devuelve filas con [date, desc, amount, balance]."""
+        rows = []
+        current_y, current_row = None, []
+
+        for w in words:
+            if current_y is None:
+                current_y = w["top"]
+
+            # salto de línea si cambia demasiado el eje Y
+            if abs(w["top"] - current_y) > 3:
+                if current_row:
+                    rows.append(self._row_to_fields(current_row))
+                current_row, current_y = [w], w["top"]
+            else:
+                current_row.append(w)
+
+        if current_row:
+            rows.append(self._row_to_fields(current_row))
+        return rows
+
+    def _row_to_fields(self, row_words):
+        texts = [w["text"] for w in row_words]
+        if not texts:
+            return [None, None, None, None]
+
+        # primera palabra suele ser fecha
+        date = texts[0] if "/" in texts[0] else None
+        # último valor es balance
+        balance = texts[-1] if "$" in texts[-1] else None
+        # penúltimo valor es el monto
+        amount = None
+        for t in texts[::-1]:
+            if "$" in t or t.replace(",", "").replace(".", "").isdigit():
+                amount = t
+                break
+        # lo demás es descripción
+        desc_parts = [t for t in texts if t not in [date, amount, balance]]
+        desc = " ".join(desc_parts)
+
+        return [date, desc, amount, balance]
