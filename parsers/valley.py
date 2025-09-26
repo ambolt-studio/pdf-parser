@@ -4,12 +4,13 @@ from typing import List, Dict, Any, Optional
 RE_DATE = re.compile(r"\b(\d{1,2}/\d{1,2})\b")  # detecta mm/dd
 RE_AMOUNT = re.compile(r"[-]?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})")
 
+
 def normalize_line(line: str) -> str:
     return line.replace("\u00A0", " ").replace("–", "-").replace("—", "-").strip()
 
+
 def split_multi_date_lines(lines: List[str]) -> List[str]:
-    """
-    Si una línea contiene varias fechas (ej. 12/16 ... 12/16 ...),
+    """Si una línea contiene varias fechas (ej. 12/16 ... 12/16 ...),
     se parte en sublíneas para que cada transacción quede aislada.
     """
     new_lines = []
@@ -26,10 +27,9 @@ def split_multi_date_lines(lines: List[str]) -> List[str]:
             new_lines.append(ln)
     return new_lines
 
+
 def extract_amount_and_direction(text: str) -> Optional[Dict[str, Any]]:
-    """
-    Busca el primer monto en el texto y determina direction (in/out).
-    """
+    """Busca el primer monto en el texto y determina direction (in/out)."""
     m = RE_AMOUNT.search(text)
     if not m:
         return None
@@ -49,32 +49,36 @@ def extract_amount_and_direction(text: str) -> Optional[Dict[str, Any]]:
 
     return {"amount": abs(amt), "direction": direction}
 
-def parse_valley(lines: List[str], fallback_year: int) -> List[Dict[str, Any]]:
-    """
-    Parser específico para Valley National Bank.
-    """
-    results: List[Dict[str, Any]] = []
-    lines = [normalize_line(ln) for ln in lines if ln.strip()]
-    lines = split_multi_date_lines(lines)
 
-    for ln in lines:
-        m_date = RE_DATE.search(ln)
-        if not m_date:
-            continue
+class ValleyParser:
+    key = "valley"
 
-        mm, dd = m_date.group(1).split("/")
-        yyyy = fallback_year
-        date_iso = f"{yyyy:04d}-{int(mm):02d}-{int(dd):02d}"
+    def __init__(self, lines: List[str], fallback_year: int):
+        self.lines = [normalize_line(ln) for ln in lines if ln.strip()]
+        self.fallback_year = fallback_year
 
-        amt_info = extract_amount_and_direction(ln)
-        if not amt_info:
-            continue
+    def parse(self) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        lines = split_multi_date_lines(self.lines)
 
-        results.append({
-            "date": date_iso,
-            "description": ln,
-            "amount": amt_info["amount"],
-            "direction": amt_info["direction"]
-        })
+        for ln in lines:
+            m_date = RE_DATE.search(ln)
+            if not m_date:
+                continue
 
-    return results
+            mm, dd = m_date.group(1).split("/")
+            yyyy = self.fallback_year
+            date_iso = f"{yyyy:04d}-{int(mm):02d}-{int(dd):02d}"
+
+            amt_info = extract_amount_and_direction(ln)
+            if not amt_info:
+                continue
+
+            results.append({
+                "date": date_iso,
+                "description": ln,
+                "amount": amt_info["amount"],
+                "direction": amt_info["direction"],
+            })
+
+        return results
