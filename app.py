@@ -28,3 +28,4 @@ async def parse_pdf(file: UploadFile = File(...)):
 
     return txs
 
+
