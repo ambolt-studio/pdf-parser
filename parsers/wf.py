@@ -27,9 +27,13 @@ RE_OUT = re.compile(
     re.I
 )
 
-# Ruido/encabezados que no deben entrar como transacciones
+# Ruido/encabezados que no deben entrar como transacciones - MEJORADO
 RE_NO_TX = re.compile(
-    r"(?:totals\b|ending daily balance|monthly service fee|important account information|service fee summary)",
+    r"(?:totals\b|ending daily balance|monthly service fee|important account information|service fee summary|"
+    r"statement period|beginning balance|deposits/credits|withdrawals/debits|ending balance|"
+    r"account number|page \d+ of \d+|account transaction fees|units used|units included|excess units|"
+    r"service charge description|cash deposited|transactions|total service charges|"
+    r"fee period|how to avoid|minimum required|this fee period|average ledger balance|minimum daily balance)",
     re.I
 )
 
@@ -66,6 +70,43 @@ def _first_amount_and_cut(text: str) -> Dict[str, Any] | None:
 
     return {"amount": val, "desc": desc}
 
+def _is_valid_transaction_line(line: str) -> bool:
+    """
+    Verifica si una línea puede ser parte de una transacción válida.
+    Filtra headers, metadatos, y otros elementos que no son transacciones.
+    """
+    line_lower = line.lower()
+    
+    # Headers típicos de Wells Fargo
+    if any(header in line_lower for header in [
+        "wells fargo", "questions?", "available by phone", "online:", "write:",
+        "your business and wells fargo", "account options", "business online banking",
+        "overdraft protection", "important account information", "new york city customers",
+        "updated limits", "effective october", "this notice", "watch for debit card scams"
+    ]):
+        return False
+    
+    # Líneas de summary/totals
+    if any(summary in line_lower for summary in [
+        "statement period activity", "beginning balance", "ending balance", 
+        "deposits/credits", "withdrawals/debits", "totals", "monthly service fee",
+        "account transaction fees", "service charge description",
+        "units used", "units included", "excess units", "total service",
+        "fee period", "how to avoid", "minimum required", "average ledger",
+        "minimum daily balance", "standard monthly service fee"
+    ]):
+        return False
+    
+    # Líneas que son solo metadatos (página, números de cuenta, etc.)
+    if re.search(r"page \d+ of \d+|account number:|for direct deposit|for wire transfers|routing number", line_lower):
+        return False
+        
+    # Líneas muy cortas que probablemente no son transacciones
+    if len(line.strip()) < 10:
+        return False
+        
+    return True
+
 class WFParser(BaseBankParser):
     key = "wf"
 
@@ -80,8 +121,13 @@ class WFParser(BaseBankParser):
         while i < n:
             line = lines[i]
             
+            # Skip empty lines and invalid transaction lines
+            if not line.strip() or not _is_valid_transaction_line(line):
+                i += 1
+                continue
+            
             # Skip noise/headers
-            if not line.strip() or RE_NO_TX.search(line):
+            if RE_NO_TX.search(line):
                 i += 1
                 continue
             
@@ -108,8 +154,8 @@ class WFParser(BaseBankParser):
                     parse_mmmdd(next_line, year)):
                     break
                     
-                # Stop if we find noise/headers
-                if RE_NO_TX.search(next_line):
+                # Stop if we find noise/headers or invalid lines
+                if RE_NO_TX.search(next_line) or not _is_valid_transaction_line(next_line):
                     break
                     
                 block.append(next_line)
@@ -117,6 +163,11 @@ class WFParser(BaseBankParser):
             
             # Join all lines of this transaction
             full_transaction_text = " ".join(block)
+            
+            # Extra validation: skip if this looks like metadata
+            if not _is_valid_transaction_line(full_transaction_text):
+                i = j
+                continue
             
             # Parse amount from the combined text
             parsed = _first_amount_and_cut(full_transaction_text)
