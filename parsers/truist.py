@@ -3,109 +3,59 @@ from typing import List, Dict, Any
 from .base import (
     BaseBankParser,
     extract_lines,
+    detect_year,
     parse_mmdd_token,
-    parse_long_date,
-    parse_mmmdd,
     RE_AMOUNT,
     pick_amount,
-    clean_desc_remove_amount,
 )
 
 class TruistParser(BaseBankParser):
     key = "truist"
 
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
-        """
-        Parser específico para Truist Bank.
-        Detecta transacciones en formato mm/dd y descarta balances/resúmenes
-        y notas legales demasiado largas.
-        """
         lines = extract_lines(pdf_bytes)
-        year = self.infer_year(full_text)
-        results: List[Dict[str, Any]] = []
+        year = detect_year(full_text)
+        txs: List[Dict[str, Any]] = []
 
-        i, n = 0, len(lines)
-        while i < n:
-            line = lines[i]
-            # detectar fecha en la línea
-            date = (
-                parse_mmdd_token(line, year)
-                or parse_long_date(line)
-                or parse_mmmdd(line, year)
-            )
-            if not date:
-                i += 1
+        current_section = None
+        for line in lines:
+            low = line.lower()
+
+            # Detectamos la sección
+            if "other withdrawals, debits and service charges" in low:
+                current_section = "out"
+                continue
+            if "deposits, credits and interest" in low:
+                current_section = "in"
+                continue
+            if low.startswith("total "):  # fin de bloque
+                current_section = None
                 continue
 
-            # armar bloque de descripción hasta la próxima fecha o corte
-            block = [line]
-            j = i + 1
-            while j < n:
-                if (
-                    parse_mmdd_token(lines[j], year)
-                    or parse_long_date(lines[j])
-                    or parse_mmmdd(lines[j], year)
-                ):
-                    break
+            # Si no estamos en sección, ignoramos
+            if not current_section:
+                continue
 
-                low = lines[j].lower()
-                if any(
-                    kw in low
-                    for kw in [
-                        "total deposits",
-                        "total withdrawals",
-                        "important:",
-                        "questions",
-                        "contact center",
-                        "member fdic",
-                        "fee schedule",
-                    ]
-                ):
-                    break
+            # Buscamos fecha
+            date = parse_mmdd_token(line, year)
+            if not date:
+                continue
 
-                block.append(lines[j])
-                j += 1
-
-            text = " ".join(block)
-            amts = RE_AMOUNT.findall(text)
+            # Buscamos monto
+            amts = RE_AMOUNT.findall(line)
             amt = pick_amount(amts, prefer_first=True)
+            if amt is None:
+                continue
 
-            if amt is not None:
-                desc = clean_desc_remove_amount(text)
+            # Limpiamos descripción: quitamos el monto del final si está
+            desc = re.sub(r"\s+" + RE_AMOUNT.pattern + r"$", "", line).strip()
 
-                if any(
-                    kw in desc.lower()
-                    for kw in [
-                        "your new balance",
-                        "beginning balance",
-                        "ending balance",
-                    ]
-                ):
-                    i = j
-                    continue
+            txs.append({
+                "date": date,
+                "description": desc,
+                "amount": abs(amt),
+                "direction": current_section
+            })
 
-                # 🔹 Determinar dirección por reglas adicionales
-                desc_low = desc.lower()
-                if amt < 0:
-                    direction = "out"
-                elif any(kw in desc_low for kw in ["payment to", "zelle", "transfer", "iat", "withdrawal", "debit"]):
-                    direction = "out"
-                elif any(kw in desc_low for kw in ["deposit", "credit", "zelle from", "incoming wire"]):
-                    direction = "in"
-                else:
-                    # fallback: signo
-                    direction = "in" if amt > 0 else "out"
-
-                results.append(
-                    {
-                        "date": date,
-                        "description": desc,
-                        "amount": abs(amt),
-                        "direction": direction,
-                    }
-                )
-
-            i = j
-
-        return results
+        return txs
 
