@@ -6,7 +6,7 @@ from .mercury import MercuryParser
 from .pnb import PNBParser
 from .wf import WFParser
 from .citi import CitiParser
-from .truist import TruistParser   # <-- nuevo
+from .truist import TruistParser
 
 # Registramos CLASES, no instancias
 REGISTRY = {
@@ -17,7 +17,7 @@ REGISTRY = {
     "pnb": PNBParser,
     "wf": WFParser,
     "citi": CitiParser,
-    "truist": TruistParser,       # <-- nuevo
+    "truist": TruistParser,
 }
 
 # Patrones para detectar banco en el texto
@@ -52,10 +52,10 @@ DETECTION = [
         r"\bCitibank\b",
         r"\bCiti\b"
     ]),
-    ("truist", [                  # <-- nuevo
+    ("truist", [
         r"\bTruist\b",
         r"truist\.com",
-        r"\bBBT\d+\b"
+        r"\bZELLE BUSINESS PAYMENT\b"
     ]),
 ]
 
@@ -68,4 +68,3 @@ def detect_bank_from_text(full_text: str) -> str:
         if any(re.search(p, t, flags=re.I) for p in pats):
             return key
     return "generic"
-
