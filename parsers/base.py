@@ -24,8 +24,13 @@ def ensure_utf8(x):
         return x.decode("utf-8", errors="ignore")
     return str(x)
 
-def extract_full_text(pdf) -> str:
-    return "\n".join(p.extract_text(x_tolerance=2, y_tolerance=3) or "" for p in pdf.pages)
+def extract_full_text(file_like: io.BytesIO) -> str:
+    """Extrae texto de todas las páginas del PDF en un solo string."""
+    with pdfplumber.open(file_like) as pdf:
+        return "\n".join(
+            p.extract_text(x_tolerance=2, y_tolerance=3) or "" 
+            for p in pdf.pages
+        )
 
 def extract_lines(pdf_bytes: bytes) -> List[str]:
     lines = []
