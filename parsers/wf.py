@@ -123,24 +123,33 @@ def _determine_direction(description: str) -> str:
     elif RE_WIRE_BNF.search(low) and not RE_WIRE_ORG.search(low):
         return "out"
     
-    # 2) Zelle específico: solo "from" es entrada, "to" es salida
+    # 2) Transfers y depósitos específicos
+    if any(pattern in low for pattern in [
+        "online transfer from",  # "Online Transfer From Baxsan, LLC..."
+        "transfer from",         # General transfers coming in
+        "llc sender",           # "Baxsan, LLC Sender..." 
+        "sender"                # General sender patterns
+    ]):
+        return "in"
+    
+    # 3) Zelle específico: solo "from" es entrada, "to" es salida
     if "zelle from" in low:
         return "in"
     elif "zelle to" in low:
         return "out"
     
-    # 3) Wire transfers que no tienen /Org= o /Bnf= 
+    # 4) Wire transfers que no tienen /Org= o /Bnf= 
     if re.search(r"\bwt\s+\w+", low) and "morgan stanley" in low:
         return "in"
     
-    # 4) Otros patrones de entrada muy específicos
+    # 5) Otros patrones de entrada muy específicos
     if any(pattern in low for pattern in [
         "interest payment", "interest credit", "deposit", 
         "credit" # pero no "credit card"
     ]) and "credit card" not in low:
         return "in"
     
-    # 5) Todo lo demás es salida (incluye purchases, payments, fees, dues, etc.)
+    # 6) Todo lo demás es salida (incluye purchases, payments, fees, dues, etc.)
     return "out"
 
 class WFParser(BaseBankParser):
