@@ -113,21 +113,17 @@ def parse_transactions_table(pdf_bytes: bytes) -> List[Dict[str, Any]]:
                     if not date_iso:
                         continue
 
-                    # heurística: monto suele estar en penúltima col (antes del balance)
-                    amt_raw = None
-                    if len(row) >= 3:
-                        amt_raw = row[-2] if re.search(r"\d", str(row[-2])) else row[-1]
-                    else:
-                        amt_raw = row[-1]
-
-                    amt = pick_amount_from_tokens([str(amt_raw)]) if amt_raw else None
+                    # heurística: monto = primer número legible en la fila
+                    all_numbers = [c for c in row if c and re.search(r"\d", str(c))]
+                    if not all_numbers:
+                        continue
+                    amt = pick_amount_from_tokens([all_numbers[1]]) if len(all_numbers) > 1 else pick_amount_from_tokens([all_numbers[0]])
                     if amt is None:
                         continue
 
-                    # descripción = todas las columnas intermedias
-                    desc = " ".join(c for c in row[1:-2] if c).strip()
-                    if not desc and len(row) > 1:
-                        desc = str(row[1]).strip()
+                    # descripción = resto
+                    desc_cols = [c for c in row[1:] if c and not re.match(RE_AMOUNT_ANY, str(c))]
+                    desc = " ".join(desc_cols).strip()
 
                     txs.append({
                         "date": date_iso,
@@ -137,7 +133,7 @@ def parse_transactions_table(pdf_bytes: bytes) -> List[Dict[str, Any]]:
                     })
     return txs
 
-# ── parser line-based (fallback) ────────────────────────────────────────
+# ── parser line-based (fallback mejorado) ───────────────────────────────
 def parse_transactions_linebased(pdf_bytes: bytes) -> List[Dict[str, Any]]:
     lines: List[str] = []
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -165,23 +161,25 @@ def parse_transactions_linebased(pdf_bytes: bytes) -> List[Dict[str, Any]]:
             i += 1
             continue
 
-        desc_parts = [line]
-        amount: Optional[float] = None
+        # --- detectar monto ---
         tokens_here = RE_AMOUNT_ANY.findall(line)
-        amount = pick_amount_from_tokens(tokens_here)
+        amount: Optional[float] = None
+        if len(tokens_here) > 1:
+            # caso IFB / Mercury → tomamos el primer número (el segundo es balance)
+            amount = pick_amount_from_tokens([tokens_here[0]])
+        else:
+            amount = pick_amount_from_tokens(tokens_here)
 
+        # --- construir descripción (PNB multiline) ---
+        desc_parts = [line]
         j = i + 1
-        while amount is None and j < n and j <= i + 3:
+        while (amount is None) and j < n and j <= i + 5:  # le damos hasta 5 líneas
             nxt = lines[j]
             if RE_DATE_SLASH.match(nxt) or RE_DATE_LONG.search(nxt):
                 break
             tokens_next = RE_AMOUNT_ANY.findall(nxt)
-            if tokens_next and nxt.strip() == tokens_next[0]:
-                amount = pick_amount_from_tokens(tokens_next)
-                j += 1
-                break
             if tokens_next:
-                amount = pick_amount_from_tokens(tokens_next)
+                amount = pick_amount_from_tokens([tokens_next[0]])
                 desc_parts.append(nxt)
                 j += 1
                 break
@@ -211,5 +209,5 @@ async def parse_pdf(file: UploadFile = File(...)) -> List[Dict[str, Any]]:
     txs = parse_transactions_table(pdf_bytes)
     if txs:
         return txs
-    # 2) fallback: line-based
+    # 2) fallback: line-based mejorado
     return parse_transactions_linebased(pdf_bytes)
