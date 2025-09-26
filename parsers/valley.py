@@ -1,63 +1,81 @@
-from typing import List, Dict, Any
 import re
-import io
-import pdfplumber
+from typing import List, Dict, Any, Optional
 
-from .base import BaseBankParser, detect_year, parse_mmdd_token, pick_amount
+RE_DATE = re.compile(r"\b(\d{1,2}/\d{1,2})\b")  # detecta mm/dd
+RE_AMOUNT = re.compile(r"[-]?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})")
 
-# Regex para capturar transacciones Valley:
-# fecha + descripción + importe real + balance
-RE_VALLEY_TX = re.compile(
-    r"(\d{1,2}/\d{1,2})\s+(.*?)\s+(-?\$[\d,]+\.\d{2})\s+\$[\d,]+\.\d{2}",
-    re.DOTALL
-)
+def normalize_line(line: str) -> str:
+    return line.replace("\u00A0", " ").replace("–", "-").replace("—", "-").strip()
 
-# Patrones para ignorar filas de resumen
-IGNORE_PATTERNS = [
-    r"Beginning Balance",
-    r"Ending Balance",
-    r"Statement Ending",
-    r"SUMMARY FOR THE PERIOD",
-    r"Deposits & Other Credits",
-    r"Withdrawals & Other Debits",
-]
-IGNORE_RE = re.compile("|".join(IGNORE_PATTERNS), re.I)
+def split_multi_date_lines(lines: List[str]) -> List[str]:
+    """
+    Si una línea contiene varias fechas (ej. 12/16 ... 12/16 ...),
+    se parte en sublíneas para que cada transacción quede aislada.
+    """
+    new_lines = []
+    for ln in lines:
+        dates = list(RE_DATE.finditer(ln))
+        if len(dates) > 1:
+            # dividir en segmentos por cada fecha detectada
+            starts = [d.start() for d in dates] + [len(ln)]
+            for i in range(len(starts) - 1):
+                chunk = ln[starts[i]:starts[i+1]].strip()
+                if chunk:
+                    new_lines.append(chunk)
+        else:
+            new_lines.append(ln)
+    return new_lines
 
+def extract_amount_and_direction(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Busca el primer monto en el texto y determina direction (in/out).
+    """
+    m = RE_AMOUNT.search(text)
+    if not m:
+        return None
+    raw = m.group()
+    amt = float(raw.replace("$", "").replace(",", ""))
+    if raw.startswith("(") or raw.startswith("-"):
+        amt = -abs(amt)
 
-class ValleyParser(BaseBankParser):
-    key = "valley"
+    # determinar dirección
+    desc_low = text.lower()
+    if "fee" in desc_low or "debit" in desc_low or "out" in desc_low or amt < 0:
+        direction = "out"
+    elif "in" in desc_low or "credit" in desc_low or amt > 0:
+        direction = "in"
+    else:
+        direction = "unknown"
 
-    def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
-        year = detect_year(full_text)
-        txs: List[Dict[str, Any]] = []
+    return {"amount": abs(amt), "direction": direction}
 
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text(x_tolerance=2, y_tolerance=3) or ""
-                for m in RE_VALLEY_TX.finditer(text):
-                    raw_date, raw_desc, raw_amount = m.groups()
+def parse_valley(lines: List[str], fallback_year: int) -> List[Dict[str, Any]]:
+    """
+    Parser específico para Valley National Bank.
+    """
+    results: List[Dict[str, Any]] = []
+    lines = [normalize_line(ln) for ln in lines if ln.strip()]
+    lines = split_multi_date_lines(lines)
 
-                    if IGNORE_RE.search(raw_desc):
-                        continue
+    for ln in lines:
+        m_date = RE_DATE.search(ln)
+        if not m_date:
+            continue
 
-                    # Fecha en ISO
-                    date_iso = parse_mmdd_token(raw_date, year)
-                    if not date_iso:
-                        continue
+        mm, dd = m_date.group(1).split("/")
+        yyyy = fallback_year
+        date_iso = f"{yyyy:04d}-{int(mm):02d}-{int(dd):02d}"
 
-                    # Monto (positivo/negativo según signo)
-                    amount = pick_amount([raw_amount], prefer_first=True)
-                    if amount is None:
-                        continue
+        amt_info = extract_amount_and_direction(ln)
+        if not amt_info:
+            continue
 
-                    # Descripción limpia
-                    desc = " ".join(raw_desc.split())
+        results.append({
+            "date": date_iso,
+            "description": ln,
+            "amount": amt_info["amount"],
+            "direction": amt_info["direction"]
+        })
 
-                    txs.append({
-                        "date": date_iso,
-                        "description": desc,
-                        "amount": amount,
-                    })
-
-        return txs
+    return results
 
