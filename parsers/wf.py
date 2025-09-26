@@ -42,26 +42,28 @@ RE_NO_TX = re.compile(
 
 def _first_amount_and_cut(text: str) -> Dict[str, Any] | None:
     """
-    Devuelve el primer monto encontrado y la descripción sin el balance:
-    - amount: float (positivo/negativo según el token)
-    - desc: str (texto hasta ANTES del segundo monto si existiera)
+    Devuelve el monto principal de la transacción (generalmente el último/más grande)
+    y la descripción sin el balance.
     """
     matches = list(RE_AMOUNT.finditer(text))
     if not matches:
         return None
 
-    # Primer monto = importe de la transacción
-    first = matches[0].group()
-
-    # Si hay segundo monto, lo usamos como 'corte' para limpiar descripción (evitar saldo)
-    if len(matches) >= 2:
-        cut_at = matches[1].start()
-        desc = text[:cut_at].rstrip()
-    else:
+    # Para transacciones normales, el monto de la transacción suele ser el último
+    # o el más grande si hay múltiples montos (para evitar fechas como "11.8.24")
+    if len(matches) == 1:
+        # Solo un monto encontrado
+        target_match = matches[0]
         desc = text
+    else:
+        # Múltiples montos: tomar el último (más probable que sea el monto de la transacción)
+        # y usar el penúltimo como punto de corte para la descripción
+        target_match = matches[-1]
+        cut_at = matches[-2].start() if len(matches) >= 2 else 0
+        desc = text[:cut_at].rstrip() if cut_at > 0 else text
 
-    # Parsear signo y valor
-    raw = first
+    # Parsear el monto seleccionado
+    raw = target_match.group()
     neg = raw.startswith("-") or raw.endswith("-") or raw.startswith("(")
     clean = raw.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
     try:
