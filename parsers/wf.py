@@ -42,28 +42,25 @@ RE_NO_TX = re.compile(
 
 def _first_amount_and_cut(text: str) -> Dict[str, Any] | None:
     """
-    Devuelve el monto principal de la transacción (generalmente el último/más grande)
-    y la descripción sin el balance.
+    Devuelve el primer monto encontrado (transacción) y la descripción sin el balance.
+    En statements de Wells Fargo: [Descripción] [MontoTransacción] [BalanceDiario]
     """
     matches = list(RE_AMOUNT.finditer(text))
     if not matches:
         return None
 
-    # Para transacciones normales, el monto de la transacción suele ser el último
-    # o el más grande si hay múltiples montos (para evitar fechas como "11.8.24")
-    if len(matches) == 1:
-        # Solo un monto encontrado
-        target_match = matches[0]
-        desc = text
+    # El primer monto es típicamente el de la transacción
+    first_match = matches[0]
+    
+    # Si hay segundo monto, es probablemente el balance - lo usamos para cortar la descripción
+    if len(matches) >= 2:
+        cut_at = matches[1].start()
+        desc = text[:cut_at].rstrip()
     else:
-        # Múltiples montos: tomar el último (más probable que sea el monto de la transacción)
-        # y usar el penúltimo como punto de corte para la descripción
-        target_match = matches[-1]
-        cut_at = matches[-2].start() if len(matches) >= 2 else 0
-        desc = text[:cut_at].rstrip() if cut_at > 0 else text
+        desc = text
 
-    # Parsear el monto seleccionado
-    raw = target_match.group()
+    # Parsear el primer monto (transacción)
+    raw = first_match.group()
     neg = raw.startswith("-") or raw.endswith("-") or raw.startswith("(")
     clean = raw.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
     try:
@@ -72,6 +69,33 @@ def _first_amount_and_cut(text: str) -> Dict[str, Any] | None:
         return None
     if neg:
         val = -val
+
+    # Caso especial: si el primer monto parece ser una fecha (como "11.8" de "11.8.24")
+    # y hay más montos disponibles, tomar el siguiente monto válido
+    if len(matches) > 1 and val < 100 and "." in clean and len(clean.split(".")[1]) <= 2:
+        # Parece una fecha, intentar con el siguiente monto
+        for i in range(1, len(matches)):
+            try:
+                candidate_raw = matches[i].group()
+                candidate_neg = candidate_raw.startswith("-") or candidate_raw.endswith("-") or candidate_raw.startswith("(")
+                candidate_clean = candidate_raw.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
+                candidate_val = float(candidate_clean)
+                if candidate_neg:
+                    candidate_val = -candidate_val
+                
+                # Si encontramos un monto más grande y razonable, usarlo
+                if abs(candidate_val) > abs(val) and abs(candidate_val) < 1000000:  # Evitar balances muy grandes
+                    val = candidate_val
+                    # Actualizar descripción para cortar antes de este monto
+                    if i + 1 < len(matches):
+                        cut_at = matches[i + 1].start()
+                        desc = text[:cut_at].rstrip()
+                    else:
+                        cut_at = matches[i].start()
+                        desc = text[:cut_at].rstrip()
+                    break
+            except:
+                continue
 
     return {"amount": val, "desc": desc}
 
