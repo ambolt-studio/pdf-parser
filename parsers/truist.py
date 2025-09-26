@@ -48,7 +48,6 @@ class TruistParser(BaseBankParser):
                 ):
                     break
 
-                # 🔹 Cortamos si parece nota legal o resumen
                 low = lines[j].lower()
                 if any(
                     kw in low
@@ -74,7 +73,6 @@ class TruistParser(BaseBankParser):
             if amt is not None:
                 desc = clean_desc_remove_amount(text)
 
-                # 🔹 Excluir balances y resúmenes explícitos
                 if any(
                     kw in desc.lower()
                     for kw in [
@@ -86,15 +84,28 @@ class TruistParser(BaseBankParser):
                     i = j
                     continue
 
+                # 🔹 Determinar dirección por reglas adicionales
+                desc_low = desc.lower()
+                if amt < 0:
+                    direction = "out"
+                elif any(kw in desc_low for kw in ["payment to", "zelle", "transfer", "iat", "withdrawal", "debit"]):
+                    direction = "out"
+                elif any(kw in desc_low for kw in ["deposit", "credit", "zelle from", "incoming wire"]):
+                    direction = "in"
+                else:
+                    # fallback: signo
+                    direction = "in" if amt > 0 else "out"
+
                 results.append(
                     {
                         "date": date,
                         "description": desc,
                         "amount": abs(amt),
-                        "direction": "out" if amt < 0 else "in",
+                        "direction": direction,
                     }
                 )
 
             i = j
 
         return results
+
