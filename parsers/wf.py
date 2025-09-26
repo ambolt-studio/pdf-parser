@@ -6,6 +6,8 @@ from .base import (
     detect_year,
     RE_AMOUNT,
     parse_mmdd_token,
+    parse_long_date,
+    parse_mmmdd,
 )
 
 # Reglas de dirección (orden de prioridad: IN/OUT explícitas antes que fallback)
@@ -13,7 +15,7 @@ RE_WIRE_ORG = re.compile(r"/org=", re.I)      # Wires que entran
 RE_WIRE_BNF = re.compile(r"/bnf=", re.I)      # Wires que salen
 
 RE_IN = re.compile(
-    r"(?:\binterest\s+payment\b|\binterest\s+credit\b|\bdeposit\b|\bcredit\b(?!\s*card)|\bzelle\s+from\b|\bsale\b|account\s+sale)",
+    r"(?:\binterest\s+payment\b|\binterest\s+credit\b|\bdeposit\b|\bcredit\b(?!\s*card)|\bzelle\s+from\b|\bsale\b|account\s+sale|\bwt\s+\w+|\bwire\s+transfer\b.*\borg=)",
     re.I
 )
 
@@ -71,49 +73,86 @@ class WFParser(BaseBankParser):
         lines = extract_lines(pdf_bytes)
         year = detect_year(full_text)
         results: List[Dict[str, Any]] = []
-
-        for line in lines:
-            ln = line.strip()
-            if not ln or RE_NO_TX.search(ln):
+        
+        # Process lines in groups (similar to GenericParser)
+        i, n = 0, len(lines)
+        
+        while i < n:
+            line = lines[i]
+            
+            # Skip noise/headers
+            if not line.strip() or RE_NO_TX.search(line):
+                i += 1
                 continue
-
-            # Fecha al inicio (mm/dd o mm/dd/yy)
-            date = parse_mmdd_token(ln, year)
+            
+            # Look for date at the beginning of line
+            date = parse_mmdd_token(line, year) or parse_long_date(line) or parse_mmmdd(line, year)
             if not date:
+                i += 1
                 continue
-
-            # Monto y desc (cortando balance si está presente)
-            parsed = _first_amount_and_cut(ln)
+            
+            # Group consecutive lines that belong to the same transaction
+            block = [line]
+            j = i + 1
+            
+            # Continue adding lines until we find another date or reach end
+            while j < n:
+                next_line = lines[j]
+                if not next_line.strip():
+                    j += 1
+                    continue
+                    
+                # Stop if we find another date (start of new transaction)
+                if (parse_mmdd_token(next_line, year) or 
+                    parse_long_date(next_line) or 
+                    parse_mmmdd(next_line, year)):
+                    break
+                    
+                # Stop if we find noise/headers
+                if RE_NO_TX.search(next_line):
+                    break
+                    
+                block.append(next_line)
+                j += 1
+            
+            # Join all lines of this transaction
+            full_transaction_text = " ".join(block)
+            
+            # Parse amount from the combined text
+            parsed = _first_amount_and_cut(full_transaction_text)
             if not parsed:
+                i = j
                 continue
 
             amt = parsed["amount"]
             desc = parsed["desc"]
 
-            # Dirección por reglas:
+            # Direction detection by rules
             low = desc.lower()
 
-            # 1) Wires con /Org= (in) /Bnf= (out)
+            # 1) Wires with /Org= (in) /Bnf= (out)
             if RE_WIRE_ORG.search(low) and not RE_WIRE_BNF.search(low):
                 direction = "in"
             elif RE_WIRE_BNF.search(low) and not RE_WIRE_ORG.search(low):
                 direction = "out"
             else:
-                # 2) Palabras clave generales
+                # 2) General keywords
                 if RE_IN.search(low):
                     direction = "in"
                 elif RE_OUT.search(low):
                     direction = "out"
                 else:
-                    # 3) Fallback por signo (WF a veces trae negativos)
+                    # 3) Fallback by sign (WF sometimes brings negatives)
                     direction = "out" if amt < 0 else "in"
 
-            # Montos en positivo; el signo lo comunica 'direction'
+            # Amounts in positive; sign is communicated by 'direction'
             results.append({
                 "date": date,
                 "description": desc,
                 "amount": abs(amt),
                 "direction": direction
             })
+            
+            i = j
 
         return results
