@@ -7,61 +7,69 @@ from .base import (
     parse_mmdd_token,
     RE_AMOUNT,
     pick_amount,
+    clean_desc_remove_amount,
 )
-
-OUT_KEYWORDS = [
-    "zelle",
-    "payment to",
-    "paypal",
-    "iat",
-    "ach debit",
-    "check",
-    "withdrawal",
-    "debit",
-    "fee",
-]
-IN_KEYWORDS = [
-    "deposit",
-    "credit",
-    "interest",
-]
 
 class TruistParser(BaseBankParser):
     key = "truist"
 
-    def detect_direction(self, desc: str, amt: float) -> str:
-        d = desc.lower()
-        if any(k in d for k in OUT_KEYWORDS):
-            return "out"
-        if any(k in d for k in IN_KEYWORDS):
-            return "in"
-        # fallback: signo del monto
-        return "out" if amt < 0 else "in"
+    SECTION_DEPOSITS = re.compile(r"Deposits.*credits", re.I)
+    SECTION_WITHDRAWALS = re.compile(r"(Other withdrawals|Debits|Service charges)", re.I)
+
+    KW_OUT = re.compile(r"(zelle|payment to|iat|debit|withdrawal|ach|bill pay)", re.I)
+    KW_IN = re.compile(r"(deposit|credit|interest|paypal\s+\d+)", re.I)
 
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
         lines = extract_lines(pdf_bytes)
         year = detect_year(full_text)
-        txs: List[Dict[str, Any]] = []
 
-        for line in lines:
-            date = parse_mmdd_token(line, year)
+        results: List[Dict[str, Any]] = []
+        section = None
+
+        for ln in lines:
+            # Detectar cambio de sección
+            if self.SECTION_DEPOSITS.search(ln):
+                section = "in"
+                continue
+            if self.SECTION_WITHDRAWALS.search(ln):
+                section = "out"
+                continue
+
+            # Intentar parsear fecha
+            date = parse_mmdd_token(ln, year)
             if not date:
                 continue
 
-            amts = RE_AMOUNT.findall(line)
+            # Buscar montos en la línea
+            amts = RE_AMOUNT.findall(ln)
             amt = pick_amount(amts, prefer_first=True)
             if amt is None:
                 continue
 
-            # limpiamos descripción dejando solo la parte transaccional
-            desc = re.sub(r"\s+" + RE_AMOUNT.pattern + r"$", "", line).strip()
+            desc = clean_desc_remove_amount(ln)
 
-            txs.append({
+            # Determinar dirección
+            direction = "unknown"
+            if section == "in":
+                direction = "in"
+            elif section == "out":
+                direction = "out"
+            else:
+                if self.KW_OUT.search(desc):
+                    direction = "out"
+                elif self.KW_IN.search(desc):
+                    direction = "in"
+                elif amt < 0:
+                    direction = "out"
+                elif amt > 0:
+                    direction = "in"
+
+            results.append({
                 "date": date,
                 "description": desc,
                 "amount": abs(amt),
-                "direction": self.detect_direction(desc, amt),
+                "direction": direction
             })
 
-        return txs
+        return results
 
