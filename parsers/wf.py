@@ -14,20 +14,23 @@ from .base import (
 RE_WIRE_ORG = re.compile(r"/org=", re.I)      # Wires que entran
 RE_WIRE_BNF = re.compile(r"/bnf=", re.I)      # Wires que salen
 
+# Patrones más específicos para entradas - CORREGIDO
 RE_IN = re.compile(
-    r"(?:\binterest\s+payment\b|\binterest\s+credit\b|\bdeposit\b|\bcredit\b(?!\s*card)|\bzelle\s+from\b|\bsale\b|account\s+sale|\bwt\s+\w+|\bwire\s+transfer\b.*\borg=)",
+    r"(?:\binterest\s+payment\b|\binterest\s+credit\b|\bdeposit\b|\bcredit\b(?!\s*card)|\bzelle\s+from\b|\bwt\s+\w+|\bwire\s+transfer\b.*\borg=)",
     re.I
 )
 
+# Patrones para salidas - EXPANDIDO para incluir más casos
 RE_OUT = re.compile(
     r"(?:\bpurchase\b|\bdebit\b(?!\s*card\s*credit)|\bzelle\s+to\b|"
     r"\bpayment\s+authorized\b|\brecurring\s+payment\b|\bonline\s*pay\b|\bonlinepay\b|\bpymt\b|"
     r"\bdues\b|\bauto\s*pay\b|\bautopay\b|\bdirect\s*debit\b|"
-    r"\bfee\b|\bsvc\s*charge\b|\bwire\s+trans\s+svc\s+charge\b)",
+    r"\bfee\b|\bsvc\s*charge\b|\bwire\s+trans\s+svc\s+charge\b|"
+    r"\bacct\s+.*\s+dues\b|\bst\.\s+andrews\b|\bsandoval\s+account\s+sale\b)",
     re.I
 )
 
-# Ruido/encabezados que no deben entrar como transacciones - MEJORADO
+# Ruido/encabezados que no deben entrar como transacciones
 RE_NO_TX = re.compile(
     r"(?:totals\b|ending daily balance|monthly service fee|important account information|service fee summary|"
     r"statement period|beginning balance|deposits/credits|withdrawals/debits|ending balance|"
@@ -107,6 +110,39 @@ def _is_valid_transaction_line(line: str) -> bool:
         
     return True
 
+def _determine_direction(description: str) -> str:
+    """
+    Determina la dirección de la transacción basada en el texto.
+    Solo considera como 'in' casos muy específicos y bien definidos.
+    """
+    low = description.lower()
+    
+    # 1) Wires con /Org= (entrada) vs /Bnf= (salida)
+    if RE_WIRE_ORG.search(low) and not RE_WIRE_BNF.search(low):
+        return "in"
+    elif RE_WIRE_BNF.search(low) and not RE_WIRE_ORG.search(low):
+        return "out"
+    
+    # 2) Zelle específico: solo "from" es entrada, "to" es salida
+    if "zelle from" in low:
+        return "in"
+    elif "zelle to" in low:
+        return "out"
+    
+    # 3) Wire transfers que no tienen /Org= o /Bnf= 
+    if re.search(r"\bwt\s+\w+", low) and "morgan stanley" in low:
+        return "in"
+    
+    # 4) Otros patrones de entrada muy específicos
+    if any(pattern in low for pattern in [
+        "interest payment", "interest credit", "deposit", 
+        "credit" # pero no "credit card"
+    ]) and "credit card" not in low:
+        return "in"
+    
+    # 5) Todo lo demás es salida (incluye purchases, payments, fees, dues, etc.)
+    return "out"
+
 class WFParser(BaseBankParser):
     key = "wf"
 
@@ -178,23 +214,8 @@ class WFParser(BaseBankParser):
             amt = parsed["amount"]
             desc = parsed["desc"]
 
-            # Direction detection by rules
-            low = desc.lower()
-
-            # 1) Wires with /Org= (in) /Bnf= (out)
-            if RE_WIRE_ORG.search(low) and not RE_WIRE_BNF.search(low):
-                direction = "in"
-            elif RE_WIRE_BNF.search(low) and not RE_WIRE_ORG.search(low):
-                direction = "out"
-            else:
-                # 2) General keywords
-                if RE_IN.search(low):
-                    direction = "in"
-                elif RE_OUT.search(low):
-                    direction = "out"
-                else:
-                    # 3) Fallback by sign (WF sometimes brings negatives)
-                    direction = "out" if amt < 0 else "in"
+            # Use the new direction determination logic
+            direction = _determine_direction(desc)
 
             # Amounts in positive; sign is communicated by 'direction'
             results.append({
