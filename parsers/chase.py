@@ -121,14 +121,25 @@ class ChaseParser(BaseBankParser):
         if re.match(r"^\s*\d{12,}\s*$", line):
             return True
         
-        # Very specific legal disclaimer start
-        if line_lower.startswith("en caso de errores o preguntas sobre sus transferencias electrónicas"):
-            return True
-        
         return False
     
     def _extract_date(self, line: str, year: int) -> Optional[str]:
-        """Extract date from MM/DD format"""
+        """Extract date from MM/DD format - but skip lines that contain legal text markers"""
+        
+        # Skip lines that contain obvious legal text markers
+        line_lower = line.lower()
+        legal_markers = [
+            "llámenos al",
+            "call us at", 
+            "en caso de errores",
+            "in case of errors",
+            "prepárese para proporcionar",
+            "prepare to provide"
+        ]
+        
+        if any(marker in line_lower for marker in legal_markers):
+            return None
+        
         # Simple date extraction at start of line
         match = re.match(r"(\d{1,2})/(\d{1,2})\s", line.strip())
         if match:
@@ -146,8 +157,8 @@ class ChaseParser(BaseBankParser):
         
         full_text = " ".join(block)
         
-        # Skip only VERY obvious legal text
-        if len(full_text) > 800 and "en caso de errores o preguntas sobre sus transferencias electrónicas de fondos" in full_text.lower():
+        # Skip if this block contains legal disclaimer content
+        if self._contains_legal_content(full_text):
             return None
         
         # Extract amount
@@ -171,6 +182,29 @@ class ChaseParser(BaseBankParser):
             "amount": abs(amount),
             "direction": direction
         }
+    
+    def _contains_legal_content(self, text: str) -> bool:
+        """Check if the text block contains legal disclaimer content"""
+        text_lower = text.lower()
+        
+        # Legal content indicators
+        legal_indicators = [
+            "llámenos al 1-866-564-2262",
+            "en caso de errores o preguntas sobre sus transferencias",
+            "prepárese para proporcionarnos la siguiente información",
+            "investigaremos su reclamo y corregiremos",
+            "para cuentas de negocios, consulte su contrato"
+        ]
+        
+        # If it contains any legal indicators, it's legal content
+        if any(indicator in text_lower for indicator in legal_indicators):
+            return True
+        
+        # If it's extremely long and contains phone numbers, likely legal
+        if len(text) > 500 and re.search(r"1-\d{3}-\d{3}-\d{4}", text):
+            return True
+        
+        return False
     
     def _extract_amount_from_block(self, block: List[str]) -> Optional[float]:
         """Extract transaction amount from the block of lines"""
@@ -210,6 +244,9 @@ class ChaseParser(BaseBankParser):
         # Remove Chase-specific codes
         cleaned = re.sub(r"\s*trn:\s*\w+\s*", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\s*ssn:\s*\d+\s*", "", cleaned, flags=re.I)
+        
+        # Remove common noise phrases that sometimes get included
+        cleaned = re.sub(r"\s*fecha\s+cantidad\s*", "", cleaned, flags=re.I)
         
         # Clean whitespace
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
