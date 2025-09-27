@@ -35,7 +35,7 @@ class ChaseParser(BaseBankParser):
                 i += 1
                 continue
             
-            # Filter obvious noise
+            # Filter obvious noise (including PDF markup)
             if self._is_noise_line(line):
                 i += 1
                 continue
@@ -70,7 +70,27 @@ class ChaseParser(BaseBankParser):
         """Detect which section of the statement we're in"""
         line_lower = line.lower().strip()
         
-        # Spanish patterns (common in Chase statements)
+        # Chase uses very clear section headers - prioritize these
+        if any(pattern in line_lower for pattern in [
+            "depósitos y adiciones", "deposits and additions",
+            "depositos y adiciones"
+        ]):
+            return "deposits"
+        
+        if any(pattern in line_lower for pattern in [
+            "retiros electrónicos", "electronic withdrawals",
+            "retiros electronicos"
+        ]):
+            return "withdrawals"
+        
+        if any(pattern in line_lower for pattern in [
+            "cargos", "charges", "fees", "comisiones"
+        ]) and not any(exclude in line_lower for exclude in [
+            "reversión", "reversal", "fee reversal"
+        ]):
+            return "fees"
+        
+        # Transaction detail sections
         if any(pattern in line_lower for pattern in [
             "detalle de transacciones", "transaction detail",
             "detalle de transacción"
@@ -84,28 +104,6 @@ class ChaseParser(BaseBankParser):
         ]):
             return "summary"
         
-        # Deposit/credit sections
-        if any(pattern in line_lower for pattern in [
-            "depósitos", "deposits", "créditos", "credits", 
-            "ingresos", "additions", "depositos electronicos"
-        ]):
-            return "deposits"
-        
-        # Withdrawal/debit sections  
-        if any(pattern in line_lower for pattern in [
-            "retiros", "withdrawals", "débitos", "debits",
-            "retiros electrónicos", "electronic withdrawals",
-            "retiros electronicos"
-        ]):
-            return "withdrawals"
-        
-        # Fee sections
-        if any(pattern in line_lower for pattern in [
-            "cargos", "fees", "service charges", "cargos por servicio",
-            "comisiones", "charges"
-        ]):
-            return "fees"
-        
         return None
     
     def _is_section_header(self, line: str) -> bool:
@@ -116,10 +114,17 @@ class ChaseParser(BaseBankParser):
         """Filter lines that are clearly not transactions"""
         line_lower = line.lower().strip()
         
+        # PDF markup and artifacts
+        if any(pattern in line_lower for pattern in [
+            "*start*", "*end*", "dailyendingbalance", "post summary",
+            "deposits and additions", "electronicwithdrawal"
+        ]):
+            return True
+        
         # Headers and titles
         noise_patterns = [
             "jpmorgan chase bank", "chase bank", "chase total checking",
-            "chase savings", "cuenta principal", "main account",
+            "chase savings", "chase platinum business", "cuenta principal", "main account",
             "información para atención", "customer service", 
             "sitio web", "website", "centro de atención",
             "llamadas internacionales", "international calls",
@@ -133,7 +138,9 @@ class ChaseParser(BaseBankParser):
             "tenga depósitos", "maintain deposits", "mantenga un saldo",
             "overdraft", "sobregiro", "favor revisa", "please review",
             "número de cuenta", "account number", "fecha descripción",
-            "date description", "amount balance", "cantidad saldo"
+            "date description", "amount balance", "cantidad saldo",
+            "total de depósitos", "total depósitos", "total de retiros",
+            "total retiros", "total comisiones", "total de cargos"
         ]
         
         # Filter if line starts with these patterns or contains them as complete line
@@ -151,6 +158,10 @@ class ChaseParser(BaseBankParser):
             
         # Filter header lines with just "CANTIDAD" or "SALDO"
         if line_lower in ["cantidad", "saldo", "amount", "balance"]:
+            return True
+        
+        # Filter lines that are continuation markers
+        if line_lower in ["trn:", "continuación", "continuation"]:
             return True
         
         return False
@@ -192,7 +203,7 @@ class ChaseParser(BaseBankParser):
         if not description or len(description) < 5:
             return None
         
-        # Determine direction using rules and context
+        # Determine direction using SECTION CONTEXT as primary method
         direction = self._determine_direction(description, section_context, amount, full_text)
         if not direction:
             return None
@@ -258,10 +269,13 @@ class ChaseParser(BaseBankParser):
         cleaned = re.sub(r"\s*ID:\s*\d+\s*", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\s*confirmation\s*#\s*\d+\s*", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\s*ref\s*#\s*\d+\s*", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s*trn:\s*\w+\s*", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s*ssn:\s*\d+\s*", "", cleaned, flags=re.I)
         
         # Remove common ending phrases
         cleaned = re.sub(r"\s*continued\s*$", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\s*cont\.*\s*$", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s*continuación\s*$", "", cleaned, flags=re.I)
         
         # Remove extra whitespace and normalize
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -273,13 +287,33 @@ class ChaseParser(BaseBankParser):
         return cleaned
     
     def _determine_direction(self, description: str, section_context: str, amount: float, full_text: str) -> Optional[str]:
-        """Determine transaction direction with Chase-specific rules and section context"""
+        """Determine transaction direction with Chase section context as PRIMARY method"""
         desc_lower = description.lower()
         full_lower = full_text.lower()
         
-        # PRIORITY 1: Clear directional indicators regardless of context
+        # PRIORITY 1: Use Chase section context (most reliable for Chase statements)
+        if section_context:
+            if section_context == "deposits":
+                # All transactions in DEPÓSITOS Y ADICIONES section are IN
+                # This includes fee reversals, incoming wires, credits, etc.
+                return "in"
+            elif section_context == "withdrawals":
+                # All transactions in RETIROS ELECTRÓNICOS section are OUT
+                return "out"
+            elif section_context == "fees":
+                # All transactions in CARGOS section are OUT (fees charged)
+                return "out"
         
-        # Wire transfers
+        # PRIORITY 2: Specific patterns that override section context (very rare for Chase)
+        
+        # Fee reversals are special - they should be IN regardless of section
+        if any(pattern in desc_lower for pattern in [
+            "reversión de cargo", "fee reversal", "reversal",
+            "reversion de cargo"
+        ]):
+            return "in"
+        
+        # Wire transfer directions (when not in clear sections)
         if any(pattern in desc_lower for pattern in [
             "wire transfer in", "wire in", "incoming wire",
             "transferencia entrante", "transferencia recibida"
@@ -292,79 +326,11 @@ class ChaseParser(BaseBankParser):
         ]):
             return "out"
         
-        # ACH and electronic transfers with clear direction
-        if any(pattern in desc_lower for pattern in [
-            "ach credit", "ach deposit", "electronic deposit",
-            "crédito ach", "depósito electrónico"
-        ]):
-            return "in"
-        
-        if any(pattern in desc_lower for pattern in [
-            "ach debit", "electronic withdrawal", "electronic payment",
-            "débito ach", "retiro electrónico", "pago electrónico",
-            "débito de cámara", "debito de camara"
-        ]):
-            return "out"
-        
-        # Specific Wise transfers (common in Chase statements)
-        if "wise" in desc_lower:
-            # Check context clues for direction
-            if any(pattern in desc_lower for pattern in [
-                "transfer from wise", "received from wise", "incoming"
-            ]):
-                return "in"
-            elif any(pattern in full_lower for pattern in [
-                "débito", "debit", "retiro", "withdrawal"
-            ]) or amount < 0:
-                return "out"
-            else:
-                # Default for Wise without clear context
-                return "out"
-        
-        # Fees and charges
-        if any(pattern in desc_lower for pattern in [
-            "fee", "charge", "cargo", "comisión", "maintenance fee",
-            "service charge", "cargo por servicio", "cuota", "monthly fee"
-        ]):
-            return "out"
-        
-        # Purchases and debits
-        if any(pattern in desc_lower for pattern in [
-            "purchase", "compra", "checkcard", "debit card",
-            "tarjeta de débito", "pos purchase", "mobile payment",
-            "point of sale", "retail purchase"
-        ]):
-            return "out"
-        
-        # Deposits and credits
-        if any(pattern in desc_lower for pattern in [
-            "deposit", "depósito", "credit", "crédito",
-            "received", "recibido", "incoming", "entrante",
-            "payment received", "pago recibido"
-        ]):
-            return "in"
-        
-        # Check transfers and payments
-        if "transfer" in desc_lower or "transferencia" in desc_lower:
-            if any(pattern in desc_lower for pattern in [
-                "from", "de", "received", "recibido", "incoming"
-            ]):
-                return "in"
-            else:
-                return "out"
-        
-        # PRIORITY 2: Use section context when available
-        if section_context:
-            if section_context in ["deposits", "credits"]:
-                return "in"
-            elif section_context in ["withdrawals", "debits", "fees"]:
-                return "out"
-        
-        # PRIORITY 3: Use amount sign as final fallback
+        # PRIORITY 3: Amount sign as final fallback (when no section context)
         if amount < 0:
             return "out"
         elif amount > 0:
             return "in"
         
-        # Default to out if unclear (conservative approach)
+        # Default conservative approach
         return "out"
