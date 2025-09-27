@@ -66,7 +66,7 @@ class BOFAParser(BaseBankParser):
             "deposits and other credits", "withdrawals and other debits", 
             "service fees", "daily ledger balances", "preferred rewards",
             "important information", "customer service", "page ", " of ",
-            "baxsan, llc", "account #", "date description amount",
+            "the happy shrimp llc", "account #", "date description amount",
             "total deposits", "total withdrawals", "total service fees",
             "subtotal for card", "continued on", "beginning balance", 
             "ending balance", "average ledger"
@@ -119,19 +119,24 @@ class BOFAParser(BaseBankParser):
         return cleaned.strip()
     
     def _determine_direction(self, description: str) -> str | None:
-        """Determinar dirección con reglas claras y simples"""
+        """Determinar dirección con reglas claras y mejoradas"""
         desc_lower = description.lower()
         
-        # Regla 1: WIRE IN siempre es entrada
-        if "wire type:wire in" in desc_lower:
+        # Regla 1: WIRE IN y INTL IN siempre son entradas
+        if ("wire type:wire in" in desc_lower or 
+            "wire type:intl in" in desc_lower):
             return "in"
         
-        # Regla 2: WIRE OUT y INTL OUT siempre son salidas
-        if "wire type:wire out" in desc_lower or "wire type:intl out" in desc_lower:
+        # Regla 2: WIRE OUT, INTL OUT y FX OUT siempre son salidas
+        if ("wire type:wire out" in desc_lower or 
+            "wire type:intl out" in desc_lower or
+            "wire type:fx out" in desc_lower):
             return "out"
         
         # Regla 3: Fees y charges siempre son salidas
-        if any(keyword in desc_lower for keyword in ["fee", "charge", "svc charge"]):
+        if any(keyword in desc_lower for keyword in [
+            "fee", "charge", "svc charge", "monthly fee"
+        ]):
             return "out"
         
         # Regla 4: Checkcard transactions siempre son salidas
@@ -142,7 +147,25 @@ class BOFAParser(BaseBankParser):
         if "transfer" in desc_lower and ("to " in desc_lower or "confirmation#" in desc_lower):
             return "out"
         
-        # Regla 6: Account verification - analizar por contexto
+        # Regla 6: Online Banking transfers son salidas (generalmente)
+        if "online banking transfer" in desc_lower:
+            return "out"
+        
+        # Regla 7: Servicios de pago conocidos como entradas
+        if any(service in desc_lower for service in [
+            "wise inc", "ontop holdings", "des:payments", "des:n ", "des:leonardo"
+        ]):
+            return "in"
+        
+        # Regla 8: Patrones de ACH/EFT entrantes
+        if any(pattern in desc_lower for pattern in [
+            "des:", "ppd", "ccd", "indn:"
+        ]):
+            # Si no es transfer explícito, probablemente es entrada
+            if "transfer" not in desc_lower:
+                return "in"
+        
+        # Regla 9: Account verification - analizar por contexto
         if "acctverify" in desc_lower or "des:acctverify" in desc_lower:
             # Si tiene signo negativo en la línea original, es salida
             if "-" in description:
@@ -150,14 +173,20 @@ class BOFAParser(BaseBankParser):
             else:
                 return "in"
         
-        # Regla 7: Wire rewards waivers son metadatos (salida neutra)
+        # Regla 10: Wire rewards waivers son metadatos (salida neutra)
         if "prfd rwds" in desc_lower and "waiver" in desc_lower:
             return "out"
         
-        # Regla 8: Si no matchea ninguna regla específica, usar heurística simple
-        # - Si contiene palabras de entrada típicas
-        if any(keyword in desc_lower for keyword in ["deposit", "credit", "received"]):
+        # Regla 11: Palabras clave de entrada
+        if any(keyword in desc_lower for keyword in [
+            "deposit", "credit", "received", "payment", "pmt info"
+        ]):
             return "in"
         
-        # - Por defecto, asumir que es salida si tiene fecha de transacción
+        # Regla 12: Si no matchea ninguna regla específica, analizar contexto
+        # - Si contiene beneficiario (BNF:), probablemente es salida
+        if "bnf:" in desc_lower:
+            return "out"
+        
+        # Por defecto, si no podemos determinar, usar "out" para ser conservadores
         return "out"
