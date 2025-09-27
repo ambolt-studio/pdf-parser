@@ -30,9 +30,10 @@ RE_OUT = re.compile(
     re.I
 )
 
-# Ruido/encabezados que no deben entrar como transacciones
+# Ruido/encabezados que no deben entrar como transacciones - CORREGIDO
+# Removido "monthly service fee" porque SÍ es una transacción legítima
 RE_NO_TX = re.compile(
-    r"(?:totals\b|ending daily balance|monthly service fee|important account information|service fee summary|"
+    r"(?:totals\b|ending daily balance|important account information|service fee summary|"
     r"statement period|beginning balance|deposits/credits|withdrawals/debits|ending balance|"
     r"account number|page \d+ of \d+|account transaction fees|units used|units included|excess units|"
     r"service charge description|cash deposited|transactions|total service charges|"
@@ -151,10 +152,10 @@ def _is_valid_transaction_line(line: str) -> bool:
     ]):
         return False
     
-    # Líneas de summary/totals
+    # Líneas de summary/totals (pero NO monthly service fee que es una transacción real)
     if any(summary in line_lower for summary in [
         "statement period activity", "beginning balance", "ending balance", 
-        "deposits/credits", "withdrawals/debits", "totals", "monthly service fee",
+        "deposits/credits", "withdrawals/debits", "totals", 
         "account transaction fees", "service charge description",
         "units used", "units included", "excess units", "total service",
         "fee period", "how to avoid", "minimum required", "average ledger",
@@ -222,7 +223,7 @@ def _determine_direction(description: str) -> str:
     ]) and "credit card" not in low:
         return "in"
     
-    # 8) Todo lo demás es salida (incluye purchases, payments, fees, dues, etc.)
+    # 8) Todo lo demás es salida (incluye purchases, payments, fees, dues, monthly service fee, etc.)
     return "out"
 
 class WFParser(BaseBankParser):
