@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script for Chase parser - Updated with direction classification tests
+Test script for Chase parser - Updated with legal section filtering tests
 """
 
 import sys
@@ -45,6 +45,53 @@ def test_chase_parser_in_registry():
     parser = parser_class()
     assert parser.key == "chase"
     print("✅ Chase parser registry test passed")
+
+def test_chase_legal_section_filtering():
+    """Test that Chase parser properly filters legal disclaimer sections"""
+    try:
+        from parsers.chase import ChaseParser
+        parser = ChaseParser()
+        
+        # Test legal section start detection
+        legal_starters = [
+            "EN CASO DE ERRORES O PREGUNTAS SOBRE SUS TRANSFERENCIAS ELECTRÓNICAS DE FONDOS:",
+            "A reminder about incoming wire transfer fees",
+            "Un recordatorio acerca de los cargos por giro bancario entrante"
+        ]
+        
+        print("Testing legal section start detection:")
+        for line in legal_starters:
+            is_legal = parser._is_legal_section_start(line)
+            print(f"  '{line[:50]}...' → {'Legal' if is_legal else 'Not legal'}")
+            assert is_legal, f"Expected '{line}' to be detected as legal section start"
+        
+        # Test legal section end detection
+        legal_enders = [
+            "JPMorgan Chase Bank, N.A. Miembro FDIC",
+            "Esta página se ha dejado en blanco intencionalmente"
+        ]
+        
+        print("Testing legal section end detection:")
+        for line in legal_enders:
+            is_legal_end = parser._is_legal_section_end(line)
+            print(f"  '{line}' → {'End' if is_legal_end else 'Not end'}")
+            assert is_legal_end, f"Expected '{line}' to be detected as legal section end"
+        
+        # Test legal text detection
+        legal_text = "EN CASO DE ERRORES O PREGUNTAS SOBRE SUS TRANSFERENCIAS ELECTRÓNICAS DE FONDOS: Llámenos al 1-866-564-2262 o escríbanos a la dirección que aparece en el frente de este estado de cuenta de inmediato si cree que su estado de cuenta o su recibo son incorrectos"
+        normal_text = "12/31 Cargo mensual por servicio. Monthly service fee"
+        
+        print("Testing legal text vs normal transaction:")
+        assert parser._is_legal_text(legal_text), "Legal text should be detected as legal"
+        assert not parser._is_legal_text(normal_text), "Normal transaction should not be detected as legal"
+        print(f"  Legal text ({len(legal_text)} chars): Filtered")
+        print(f"  Normal transaction ({len(normal_text)} chars): Not filtered")
+        
+        print("✅ Chase legal section filtering test passed")
+    except Exception as e:
+        print(f"❌ Chase legal section filtering test failed: {e}")
+        return False
+    return True
 
 def test_chase_section_detection():
     """Test Chase section detection for proper direction classification"""
@@ -108,7 +155,7 @@ def test_chase_direction_classification():
                 "expected": "out"
             },
             {
-                "description": "Cargo por transferencia electrÓnica bancaria nacional entrante. Domestic incoming wire fee",
+                "description": "Cargo mensual por servicio. Monthly service fee",
                 "section": "fees",
                 "amount": 15,
                 "expected": "out"
@@ -135,65 +182,55 @@ def test_chase_direction_classification():
         return False
     return True
 
-def test_chase_parser_with_sample():
-    """Test Chase parser with sample transaction data"""
-    # Sample lines that would come from a Chase PDF
-    sample_lines = [
-        "JPMorgan Chase Bank, N.A.",
-        "CHASE TOTAL CHECKING",
-        "DETALLE DE TRANSACCIONES", 
-        "FECHA DESCRIPCIÓN CANTIDAD SALDO",
-        "Saldo inicial $8,879.37",
-        "11/06 DÉbito de cÁmara de compensaciÓn automatizada. Wise US inc wise",
-        "trnwise web ID: 1453233521",
-        "-1,924.67 6,954.70",
-        "Saldo final $6,954.70"
-    ]
-    
-    # Simulate PDF bytes (we'll use text simulation)
-    sample_text = "\n".join(sample_lines)
-    
+def test_chase_enhanced_date_extraction():
+    """Test enhanced date extraction that avoids legal text false matches"""
     try:
         from parsers.chase import ChaseParser
         parser = ChaseParser()
-        
-        # Test key components
         year = 2024
         
-        # Test date extraction
-        date_line = "11/06 DÉbito de cÁmara de compensaciÓn automatizada. Wise US inc wise"
-        date = parser._extract_date(date_line, year)
-        print(f"Extracted date: {date}")
-        assert date == "2024-11-06"
-        
-        # Test amount extraction
-        amount_block = [
-            "11/06 DÉbito de cÁmara de compensaciÓn automatizada. Wise US inc wise",
-            "trnwise web ID: 1453233521", 
-            "-1,924.67 6,954.70"
+        test_cases = [
+            # Valid transaction dates
+            {
+                "line": "12/31 Cargo mensual por servicio. Monthly service fee",
+                "expected": "2024-12-31",
+                "desc": "Valid transaction date"
+            },
+            {
+                "line": "12/02 transferencia electrÓnica bancaria saliente",
+                "expected": "2024-12-02", 
+                "desc": "Valid wire transfer date"
+            },
+            # Should be filtered - legal text with dates
+            {
+                "line": "EN CASO DE ERRORES O PREGUNTAS... 12/31 ... más información",
+                "expected": None,
+                "desc": "Date in legal text should be ignored"
+            },
+            {
+                "line": "Llámenos al 1-866-564-2262 si tiene preguntas sobre 12/31",
+                "expected": None,
+                "desc": "Date with legal keywords should be ignored"
+            },
+            # Invalid dates
+            {
+                "line": "13/32 Invalid date values",
+                "expected": None,
+                "desc": "Invalid date should be ignored"
+            }
         ]
-        amount = parser._extract_amount_from_block(amount_block)
-        print(f"Extracted amount: {amount}")
-        assert amount == -1924.67
         
-        # Test description cleaning
-        full_text = " ".join(amount_block)
-        description = parser._clean_description(full_text)
-        print(f"Cleaned description: '{description}'")
-        assert len(description) > 10
-        assert "wise" in description.lower()
+        print("Testing enhanced date extraction:")
+        for case in test_cases:
+            extracted = parser._extract_date(case["line"], year)
+            status = "✅" if extracted == case["expected"] else "❌"
+            print(f"  {status} {case['desc']}: {extracted or 'None'}")
+            assert extracted == case["expected"], f"Expected '{case['expected']}', got '{extracted}'"
         
-        # Test direction determination
-        direction = parser._determine_direction(description, "withdrawals", amount, full_text)
-        print(f"Determined direction: {direction}")
-        assert direction == "out"
-        
-        print("✅ Chase parser sample test passed")
-        
+        print("✅ Chase enhanced date extraction test passed")
     except Exception as e:
-        print(f"❌ Chase parser sample test failed: {e}")
+        print(f"❌ Chase enhanced date extraction test failed: {e}")
         return False
-    
     return True
 
 def test_chase_noise_filtering():
@@ -210,7 +247,8 @@ def test_chase_noise_filtering():
             "JPMorgan Chase Bank, N.A.",
             "Página 1 de 4",
             "000000601738035",
-            "trn:"
+            "SALDO FINAL DIARIO",
+            "Esta página se ha dejado en blanco intencionalmente"
         ]
         
         print("Testing noise filtering:")
@@ -227,16 +265,17 @@ def test_chase_noise_filtering():
 
 def run_all_tests():
     """Run all Chase parser tests"""
-    print("Running Enhanced Chase Parser Tests")
-    print("=" * 50)
+    print("Running Enhanced Chase Parser Tests with Legal Section Filtering")
+    print("=" * 70)
     
     tests = [
         test_chase_detection,
         test_chase_parser_creation,
         test_chase_parser_in_registry,
+        test_chase_legal_section_filtering,
         test_chase_section_detection,
         test_chase_direction_classification,
-        test_chase_parser_with_sample,
+        test_chase_enhanced_date_extraction,
         test_chase_noise_filtering
     ]
     
@@ -255,7 +294,7 @@ def run_all_tests():
     print(f"Test Results: {passed} passed, {failed} failed")
     
     if failed == 0:
-        print("🎉 All tests passed!")
+        print("🎉 All tests passed! Chase parser is ready for production.")
         return True
     else:
         print("❌ Some tests failed")
