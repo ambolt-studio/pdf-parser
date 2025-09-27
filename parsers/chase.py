@@ -29,17 +29,20 @@ class ChaseParser(BaseBankParser):
                 i += 1
                 continue
             
-            # Check if we're entering a legal disclaimer section
+            # Check if we're entering a legal disclaimer section (more specific)
             if self._is_legal_section_start(line):
                 in_legal_section = True
                 i += 1
                 continue
             
+            # Check if we've exited the legal section
+            if in_legal_section and self._is_legal_section_end(line):
+                in_legal_section = False
+                i += 1
+                continue
+            
             # Skip everything in legal sections
             if in_legal_section:
-                # Check if we've exited the legal section
-                if self._is_legal_section_end(line):
-                    in_legal_section = False
                 i += 1
                 continue
             
@@ -55,7 +58,7 @@ class ChaseParser(BaseBankParser):
                 i += 1
                 continue
             
-            # Look for transaction start (date pattern)
+            # Look for transaction start (date pattern) - more permissive
             date = self._extract_date(line, year)
             if not date:
                 i += 1
@@ -87,21 +90,18 @@ class ChaseParser(BaseBankParser):
         return results
     
     def _is_legal_section_start(self, line: str) -> bool:
-        """Detect the start of legal disclaimer sections"""
+        """Detect the start of legal disclaimer sections - more specific"""
         line_lower = line.lower().strip()
         
-        # Common legal section starters in Chase statements
+        # Much more specific legal section starters
         legal_starters = [
-            "en caso de errores o preguntas sobre sus transferencias",
-            "en caso de errores o preguntas sobre sus transferencias electrónicas",
-            "in case of errors or questions about your electronic transfers",
-            "recordatorio: los cargos asociados",
-            "reminder: the charges associated",
+            "en caso de errores o preguntas sobre sus transferencias electrónicas de fondos:",
             "a reminder about incoming wire transfer fees",
-            "un recordatorio acerca de los cargos por giro bancario"
+            "un recordatorio acerca de los cargos por giro bancario entrante"
         ]
         
-        return any(starter in line_lower for starter in legal_starters)
+        # Must match exactly, not just contain
+        return any(line_lower.startswith(starter) for starter in legal_starters)
     
     def _is_legal_section_end(self, line: str) -> bool:
         """Detect the end of legal disclaimer sections"""
@@ -161,7 +161,7 @@ class ChaseParser(BaseBankParser):
         return self._detect_section(line) is not None
     
     def _is_noise_line(self, line: str) -> bool:
-        """Filter lines that are clearly not transactions"""
+        """Filter lines that are clearly not transactions - more conservative"""
         line_lower = line.lower().strip()
         
         # PDF markup and artifacts
@@ -217,32 +217,18 @@ class ChaseParser(BaseBankParser):
         if line_lower in ["trn:", "continuación", "continuation"]:
             return True
         
-        # Filter very long lines that are likely legal text
-        if len(line) > 500:
-            return True
-        
-        # Filter date range lines (statement periods)
-        if re.search(r"\d{1,2}/\d{1,2}/\d{4}\s+a\s+\d{1,2}/\d{1,2}/\d{4}", line_lower):
-            return True
-        if re.search(r"(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\s+\d{1,2},?\s+\d{4}\s+a\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\s+\d{1,2},?\s+\d{4}", line_lower):
+        # Only filter EXTREMELY long lines that are clearly legal text (much higher threshold)
+        if len(line) > 1000:
             return True
         
         return False
     
     def _extract_date(self, line: str, year: int) -> Optional[str]:
-        """Extract date from MM/DD format (common in Chase statements)"""
-        # Skip if line looks like legal text
-        if len(line) > 200:
-            return None
-        
-        # Skip if line contains legal keywords
-        legal_keywords = [
-            "en caso de errores", "in case of errors", "llámenos al", "call us at",
-            "prepárese para proporcionar", "prepare to provide", "su nombre y número",
-            "investigaremos su reclamo", "we will investigate"
-        ]
-        line_lower = line.lower()
-        if any(keyword in line_lower for keyword in legal_keywords):
+        """Extract date from MM/DD format - less restrictive"""
+        # Only skip if line is VERY long and contains obvious legal markers
+        if len(line) > 500 and any(marker in line.lower() for marker in [
+            "en caso de errores", "llámenos al 1-866", "prepárese para proporcionar"
+        ]):
             return None
         
         # Look for MM/DD at the beginning of the line
@@ -275,8 +261,8 @@ class ChaseParser(BaseBankParser):
         # Combine all lines in the block
         full_text = " ".join(block)
         
-        # Skip if this looks like legal text
-        if self._is_legal_text(full_text):
+        # Only skip if this is CLEARLY legal text (very specific)
+        if self._is_definitely_legal_text(full_text):
             return None
         
         # Extract amount from the block
@@ -287,10 +273,6 @@ class ChaseParser(BaseBankParser):
         # Clean description by removing amounts and dates
         description = self._clean_description(full_text)
         if not description or len(description) < 5:
-            return None
-        
-        # Skip if description is still too long (likely legal text)
-        if len(description) > 400:
             return None
         
         # Determine direction using SECTION CONTEXT as primary method
@@ -305,24 +287,22 @@ class ChaseParser(BaseBankParser):
             "direction": direction
         }
     
-    def _is_legal_text(self, text: str) -> bool:
-        """Check if text appears to be legal disclaimer content"""
+    def _is_definitely_legal_text(self, text: str) -> bool:
+        """Check if text is DEFINITELY legal disclaimer content - very specific"""
         text_lower = text.lower()
         
-        # Legal text indicators
-        legal_indicators = [
-            "en caso de errores o preguntas",
+        # Must contain multiple VERY specific legal indicators
+        strong_legal_indicators = [
+            "en caso de errores o preguntas sobre sus transferencias electrónicas de fondos",
             "llámenos al 1-866-564-2262",
-            "prepárese para proporcionarnos",
-            "investigaremos su reclamo",
-            "jpmorgan chase bank, n.a. miembro fdic",
-            "para cuentas de negocios, consulte",
-            "esta página se ha dejado en blanco"
+            "prepárese para proporcionarnos la siguiente información",
+            "investigaremos su reclamo y corregiremos cualquier error",
+            "para cuentas de negocios, consulte su contrato de cuenta"
         ]
         
-        # If contains multiple legal indicators, it's legal text
-        matches = sum(1 for indicator in legal_indicators if indicator in text_lower)
-        return matches >= 2 or len(text) > 800
+        # Must have at least 2 strong indicators AND be very long to be considered legal
+        strong_matches = sum(1 for indicator in strong_legal_indicators if indicator in text_lower)
+        return strong_matches >= 2 and len(text) > 1200
     
     def _extract_amount_from_block(self, block: List[str]) -> Optional[float]:
         """Extract transaction amount from the block of lines"""
@@ -332,21 +312,7 @@ class ChaseParser(BaseBankParser):
         for line in block:
             amounts = RE_AMOUNT.findall(line)
             for amt_str in amounts:
-                # Skip obvious balance amounts (usually larger numbers at end)
-                # Focus on transaction amounts which are typically smaller
-                clean_for_check = amt_str.replace("$", "").replace(",", "").replace(".", "").replace("(", "").replace(")", "").replace("-", "")
-                if not re.search(r"\d{5,}", clean_for_check):  # Skip amounts > 99,999
-                    all_amounts.append(amt_str)
-        
-        if not all_amounts:
-            # If no small amounts found, take any amount but be more selective
-            for line in block:
-                amounts = RE_AMOUNT.findall(line)
-                if amounts:
-                    # Only take first amount from reasonable length lines
-                    if len(line) < 300:
-                        all_amounts = [amounts[0]]
-                        break
+                all_amounts.append(amt_str)
         
         if not all_amounts:
             return None
