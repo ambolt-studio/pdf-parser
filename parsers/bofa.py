@@ -18,9 +18,17 @@ class BOFAParser(BaseBankParser):
         year = detect_year(full_text)
         results: List[Dict[str, Any]] = []
         
-        # Estrategia completamente nueva: procesar línea por línea y usar reglas claras
+        # Estrategia: procesar línea por línea pero también detectar contexto de sección
+        current_section = None
+        
         for i, line in enumerate(lines):
             if not line.strip():
+                continue
+            
+            # Detectar cambio de sección para contexto
+            section_detected = self._detect_section(line)
+            if section_detected:
+                current_section = section_detected
                 continue
             
             # Filtrar ruido obvio
@@ -42,8 +50,8 @@ class BOFAParser(BaseBankParser):
             if not description or len(description) < 10:
                 continue
             
-            # Determinar dirección usando reglas simples y claras
-            direction = self._determine_direction(description)
+            # Determinar dirección usando reglas y contexto de sección
+            direction = self._determine_direction(description, current_section)
             if not direction:
                 continue
             
@@ -55,6 +63,21 @@ class BOFAParser(BaseBankParser):
             })
         
         return results
+    
+    def _detect_section(self, line: str) -> str | None:
+        """Detectar en qué sección del statement estamos"""
+        line_lower = line.lower().strip()
+        
+        if "deposits and other additions" in line_lower or "deposits and other credits" in line_lower:
+            return "deposits"
+        elif "withdrawals and other debits" in line_lower or "other subtractions" in line_lower:
+            return "withdrawals"
+        elif "atm and debit card subtractions" in line_lower:
+            return "withdrawals"
+        elif "service fees" in line_lower:
+            return "withdrawals"
+        
+        return None
     
     def _is_noise_line(self, line: str) -> bool:
         """Filtrar líneas que claramente no son transacciones"""
@@ -122,8 +145,8 @@ class BOFAParser(BaseBankParser):
         
         return cleaned.strip()
     
-    def _determine_direction(self, description: str) -> str | None:
-        """Determinar dirección con reglas claras y mejoradas"""
+    def _determine_direction(self, description: str, section_context: str = None) -> str | None:
+        """Determinar dirección con reglas claras y contexto de sección"""
         desc_lower = description.lower()
         
         # Regla 1: WIRE IN y INTL IN siempre son entradas
@@ -169,18 +192,29 @@ class BOFAParser(BaseBankParser):
         if ("online banking" in desc_lower and any(kw in desc_lower for kw in ["payment", "transfer"])):
             return "out"
         
-        # Regla 10: Servicios de pago conocidos como entradas
-        if any(service in desc_lower for service in [
-            "wise inc", "ontop holdings"
-        ]):
+        # Regla 10: Wise Inc - depende del contexto de sección
+        if "wise inc" in desc_lower:
+            if section_context == "deposits":
+                return "in"
+            elif section_context == "withdrawals":
+                return "out"
+            else:
+                # Sin contexto, usar heurística: si aparece con signos negativos, es salida
+                if "-" in description:
+                    return "out"
+                else:
+                    return "in"
+        
+        # Regla 11: ONTOP Holdings como entrada
+        if "ontop holdings" in desc_lower:
             return "in"
         
-        # Regla 11: Patrones ACH con descripciones específicas de entrada
+        # Regla 12: Patrones ACH con descripciones específicas de entrada
         if ("des:" in desc_lower and 
-            any(pattern in desc_lower for pattern in ["payments", "alejandr", "leonardo", "wise"])):
+            any(pattern in desc_lower for pattern in ["payments", "alejandr", "leonardo"])):
             return "in"
         
-        # Regla 12: Account verification - analizar por contexto
+        # Regla 13: Account verification - analizar por contexto
         if "acctverify" in desc_lower or "des:acctverify" in desc_lower:
             # Si tiene signo negativo en la línea original, es salida
             if "-" in description:
@@ -188,23 +222,29 @@ class BOFAParser(BaseBankParser):
             else:
                 return "in"
         
-        # Regla 13: Wire rewards waivers son metadatos (salida neutra)
+        # Regla 14: Wire rewards waivers son metadatos (salida neutra)
         if ("preferred rewards" in desc_lower or "prfd rwds" in desc_lower) and "waiver" in desc_lower:
             return "out"
         
-        # Regla 14: Palabras clave de entrada
+        # Regla 15: Palabras clave de entrada
         if any(keyword in desc_lower for keyword in [
             "deposit", "credit", "received", "pmt info:"
         ]):
             return "in"
         
-        # Regla 15: Si contiene beneficiario (BNF:), probablemente es salida
+        # Regla 16: Si contiene beneficiario (BNF:), probablemente es salida
         if "bnf:" in desc_lower:
             return "out"
         
-        # Regla 16: Cualquier cosa con DES: y patrones de ACH que no sea transfer explícito
-        if "des:" in desc_lower and "transfer" not in desc_lower:
+        # Regla 17: Cualquier cosa con DES: y patrones de ACH que no sea transfer explícito
+        if "des:" in desc_lower and "transfer" not in desc_lower and "wise" not in desc_lower:
             return "in"
         
-        # Por defecto, usar "out" para ser conservadores
+        # Por defecto, usar contexto de sección si está disponible
+        if section_context == "deposits":
+            return "in"
+        elif section_context == "withdrawals":
+            return "out"
+        
+        # Sin contexto, ser conservador
         return "out"
