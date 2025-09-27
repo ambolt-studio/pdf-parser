@@ -53,7 +53,7 @@ class ChaseParser(BaseBankParser):
                 next_line = lines[j]
                 if self._extract_date(next_line, year) or self._is_section_header(next_line):
                     break
-                if next_line.strip():  # Only add non-empty lines
+                if next_line.strip() and not self._is_noise_line(next_line):
                     transaction_block.append(next_line)
                 j += 1
             
@@ -73,27 +73,36 @@ class ChaseParser(BaseBankParser):
         # Spanish patterns (common in Chase statements)
         if any(pattern in line_lower for pattern in [
             "detalle de transacciones", "transaction detail",
-            "resumen de cuenta", "account summary"
+            "detalle de transacción"
         ]):
             return "transactions"
+        
+        # Summary sections
+        if any(pattern in line_lower for pattern in [
+            "resumen de cuenta", "account summary",
+            "resumen de saldos", "balance summary"
+        ]):
+            return "summary"
         
         # Deposit/credit sections
         if any(pattern in line_lower for pattern in [
             "depósitos", "deposits", "créditos", "credits", 
-            "ingresos", "additions"
+            "ingresos", "additions", "depositos electronicos"
         ]):
             return "deposits"
         
         # Withdrawal/debit sections  
         if any(pattern in line_lower for pattern in [
             "retiros", "withdrawals", "débitos", "debits",
-            "retiros electrónicos", "electronic withdrawals"
+            "retiros electrónicos", "electronic withdrawals",
+            "retiros electronicos"
         ]):
             return "withdrawals"
         
         # Fee sections
         if any(pattern in line_lower for pattern in [
-            "cargos", "fees", "service charges", "cargos por servicio"
+            "cargos", "fees", "service charges", "cargos por servicio",
+            "comisiones", "charges"
         ]):
             return "fees"
         
@@ -122,7 +131,9 @@ class ChaseParser(BaseBankParser):
             "rendimiento porcentual", "annual percentage yield",
             "no se cobró", "no charge", "cargo mensual", "monthly fee",
             "tenga depósitos", "maintain deposits", "mantenga un saldo",
-            "overdraft", "sobregiro", "favor revisa", "please review"
+            "overdraft", "sobregiro", "favor revisa", "please review",
+            "número de cuenta", "account number", "fecha descripción",
+            "date description", "amount balance", "cantidad saldo"
         ]
         
         # Filter if line starts with these patterns or contains them as complete line
@@ -131,11 +142,15 @@ class ChaseParser(BaseBankParser):
                 return True
         
         # Filter summary lines with just amounts
-        if re.match(r"^\s*\$?[\d,]+\.\d{2}\s*$", line):
+        if re.match(r"^\s*[\$\-]?[\d,]+\.\d{2}\s*$", line):
             return True
             
         # Filter lines that are just account numbers
         if re.match(r"^\s*\d{10,}\s*$", line):
+            return True
+            
+        # Filter header lines with just "CANTIDAD" or "SALDO"
+        if line_lower in ["cantidad", "saldo", "amount", "balance"]:
             return True
         
         return False
@@ -197,9 +212,19 @@ class ChaseParser(BaseBankParser):
         for line in block:
             amounts = RE_AMOUNT.findall(line)
             for amt_str in amounts:
-                # Skip obvious balance amounts (usually larger and at end of line)
-                if not re.search(r"\d{4,}", amt_str.replace(",", "").replace(".", "")):
+                # Skip obvious balance amounts (usually larger numbers at end)
+                # Focus on transaction amounts which are typically smaller
+                clean_for_check = amt_str.replace("$", "").replace(",", "").replace(".", "").replace("(", "").replace(")", "").replace("-", "")
+                if not re.search(r"\d{5,}", clean_for_check):  # Skip amounts > 99,999
                     all_amounts.append(amt_str)
+        
+        if not all_amounts:
+            # If no small amounts found, take any amount
+            for line in block:
+                amounts = RE_AMOUNT.findall(line)
+                if amounts:
+                    all_amounts = amounts
+                    break
         
         if not all_amounts:
             return None
@@ -232,9 +257,18 @@ class ChaseParser(BaseBankParser):
         cleaned = re.sub(r"\s*web\s+ID:\s*\d+\s*", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\s*ID:\s*\d+\s*", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\s*confirmation\s*#\s*\d+\s*", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s*ref\s*#\s*\d+\s*", "", cleaned, flags=re.I)
         
-        # Remove extra whitespace
+        # Remove common ending phrases
+        cleaned = re.sub(r"\s*continued\s*$", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s*cont\.*\s*$", "", cleaned, flags=re.I)
+        
+        # Remove extra whitespace and normalize
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        
+        # Capitalize first letter for consistency
+        if cleaned:
+            cleaned = cleaned[0].upper() + cleaned[1:] if len(cleaned) > 1 else cleaned.upper()
         
         return cleaned
     
@@ -267,41 +301,57 @@ class ChaseParser(BaseBankParser):
         
         if any(pattern in desc_lower for pattern in [
             "ach debit", "electronic withdrawal", "electronic payment",
-            "débito ach", "retiro electrónico", "pago electrónico"
+            "débito ach", "retiro electrónico", "pago electrónico",
+            "débito de cámara", "debito de camara"
         ]):
             return "out"
         
         # Specific Wise transfers (common in Chase statements)
         if "wise" in desc_lower:
+            # Check context clues for direction
             if any(pattern in desc_lower for pattern in [
-                "wise us inc", "transfer from wise", "received from wise"
+                "transfer from wise", "received from wise", "incoming"
             ]):
-                # Check if it's actually an outgoing transfer to Wise
-                if "débito" in full_lower or "debit" in full_lower or amount < 0:
-                    return "out"
-                else:
-                    return "in"
+                return "in"
+            elif any(pattern in full_lower for pattern in [
+                "débito", "debit", "retiro", "withdrawal"
+            ]) or amount < 0:
+                return "out"
+            else:
+                # Default for Wise without clear context
+                return "out"
         
         # Fees and charges
         if any(pattern in desc_lower for pattern in [
             "fee", "charge", "cargo", "comisión", "maintenance fee",
-            "service charge", "cargo por servicio", "cuota"
+            "service charge", "cargo por servicio", "cuota", "monthly fee"
         ]):
             return "out"
         
         # Purchases and debits
         if any(pattern in desc_lower for pattern in [
             "purchase", "compra", "checkcard", "debit card",
-            "tarjeta de débito", "pos purchase", "mobile payment"
+            "tarjeta de débito", "pos purchase", "mobile payment",
+            "point of sale", "retail purchase"
         ]):
             return "out"
         
         # Deposits and credits
         if any(pattern in desc_lower for pattern in [
             "deposit", "depósito", "credit", "crédito",
-            "received", "recibido", "incoming", "entrante"
+            "received", "recibido", "incoming", "entrante",
+            "payment received", "pago recibido"
         ]):
             return "in"
+        
+        # Check transfers and payments
+        if "transfer" in desc_lower or "transferencia" in desc_lower:
+            if any(pattern in desc_lower for pattern in [
+                "from", "de", "received", "recibido", "incoming"
+            ]):
+                return "in"
+            else:
+                return "out"
         
         # PRIORITY 2: Use section context when available
         if section_context:
