@@ -8,6 +8,7 @@ from .wf import WFParser
 from .citi import CitiParser
 from .truist import TruistParser
 from .bofa import BOFAParser
+from .chase import ChaseParser
 
 # Registramos CLASES, no instancias
 REGISTRY = {
@@ -20,10 +21,21 @@ REGISTRY = {
     "citi": CitiParser,
     "truist": TruistParser,
     "bofa": BOFAParser,
+    "chase": ChaseParser,
 }
 
 # Patrones para detectar banco en el texto - ORDEN IMPORTANTE
 DETECTION = [
+    # Chase patterns - add early to avoid conflicts
+    ("chase", [
+        r"\bJPMorgan Chase Bank\b",
+        r"\bChase Bank\b",
+        r"\bChase Total Checking\b",
+        r"\bChase Savings\b",
+        r"chase\.com",
+        r"\bChase Mobile\b",
+        r"\bChase Debit Card\b"
+    ]),
     # BOFA primero para evitar conflictos con otros patrones
     ("bofa", [
         r"\bBank of America\b",
