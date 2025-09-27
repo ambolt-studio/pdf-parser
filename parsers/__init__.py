@@ -7,6 +7,7 @@ from .pnb import PNBParser
 from .wf import WFParser
 from .citi import CitiParser
 from .truist import TruistParser
+from .bofa import BOFAParser
 
 # Registramos CLASES, no instancias
 REGISTRY = {
@@ -18,6 +19,7 @@ REGISTRY = {
     "wf": WFParser,
     "citi": CitiParser,
     "truist": TruistParser,
+    "bofa": BOFAParser,
 }
 
 # Patrones para detectar banco en el texto
@@ -56,6 +58,13 @@ DETECTION = [
         r"\bTruist\b",
         r"truist\.com",
         r"\bZELLE BUSINESS PAYMENT\b"
+    ]),
+    ("bofa", [
+        r"\bBank of America\b",
+        r"bankofamerica\.com",
+        r"\bBOFA\b",
+        r"\bBusiness Advantage\b",
+        r"1\.888\.BUSINESS"
     ]),
 ]
 
