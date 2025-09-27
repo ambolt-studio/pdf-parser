@@ -22,8 +22,16 @@ REGISTRY = {
     "bofa": BOFAParser,
 }
 
-# Patrones para detectar banco en el texto
+# Patrones para detectar banco en el texto - ORDEN IMPORTANTE
 DETECTION = [
+    # BOFA primero para evitar conflictos con otros patrones
+    ("bofa", [
+        r"\bBank of America\b",
+        r"bankofamerica\.com",
+        r"\bBOFA\b",
+        r"\bBusiness Advantage\b",
+        r"1\.888\.BUSINESS"
+    ]),
     ("ifb", [
         r"International\s+Finance\s+Bank",
         r"\bIFB Bus Checking\b",
@@ -44,10 +52,12 @@ DETECTION = [
         r"\bP\.O\. Box 012620, Miami\b",
         r"\bACCT ENDING\b"
     ]),
+    # Wells Fargo más específico para evitar conflictos
     ("wf", [
         r"\bWells Fargo\b",
         r"wellsfargo\.com",
-        r"\bWT\s"
+        r"\bNavigate Business Checking\b",
+        r"\bInitiate Business Checking\b"
     ]),
     ("citi", [
         r"\bCitiBusiness\b",
@@ -58,13 +68,6 @@ DETECTION = [
         r"\bTruist\b",
         r"truist\.com",
         r"\bZELLE BUSINESS PAYMENT\b"
-    ]),
-    ("bofa", [
-        r"\bBank of America\b",
-        r"bankofamerica\.com",
-        r"\bBOFA\b",
-        r"\bBusiness Advantage\b",
-        r"1\.888\.BUSINESS"
     ]),
 ]
 
