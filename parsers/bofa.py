@@ -150,6 +150,9 @@ class BOFAParser(BaseBankParser):
         """Determinar dirección con reglas claras y contexto de sección"""
         desc_lower = description.lower()
         
+        # PRIORIDAD 1: Usar contexto de sección para la mayoría de casos
+        # Solo usar reglas específicas para casos muy claros
+        
         # Regla 1: WIRE IN y INTL IN siempre son entradas
         if ("wire type:wire in" in desc_lower or 
             "wire type:intl in" in desc_lower):
@@ -185,79 +188,60 @@ class BOFAParser(BaseBankParser):
         ]):
             return "out"
         
-        # Regla 8: Transfers con "confirmation#" - depende del contexto
-        if "transfer" in desc_lower and "confirmation#" in desc_lower:
-            if section_context == "deposits":
-                return "in"
-            elif section_context == "withdrawals":
-                return "out"
-            else:
-                # Sin contexto, asumir salida por defecto
-                return "out"
-        
-        # Regla 9: Online Banking - depende del contexto de sección
-        if ("online banking" in desc_lower and any(kw in desc_lower for kw in ["payment", "transfer"])):
-            if section_context == "deposits":
-                return "in"
-            elif section_context == "withdrawals":
-                return "out"
-            else:
-                # Sin contexto, asumir salida por defecto
-                return "out"
-        
-        # Regla 10: Wise Inc - depende del contexto de sección
-        if "wise inc" in desc_lower:
-            if section_context == "deposits":
-                return "in"
-            elif section_context == "withdrawals":
-                return "out"
-            else:
-                # Sin contexto, usar heurística: si aparece con signos negativos, es salida
-                if "-" in description:
-                    return "out"
-                else:
-                    return "in"
-        
-        # Regla 11: ONTOP Holdings como entrada
-        if "ontop holdings" in desc_lower:
-            return "in"
-        
-        # Regla 12: Patrones ACH con descripciones específicas de entrada
-        if ("des:" in desc_lower and 
-            any(pattern in desc_lower for pattern in ["payments", "alejandr", "leonardo"])):
-            return "in"
-        
-        # Regla 13: Account verification - analizar por contexto
-        if "acctverify" in desc_lower or "des:acctverify" in desc_lower:
-            # Si tiene signo negativo en la línea original, es salida
-            if "-" in description:
-                return "out"
-            else:
-                return "in"
-        
-        # Regla 14: Wire rewards waivers son metadatos (salida neutra)
-        if ("preferred rewards" in desc_lower or "prfd rwds" in desc_lower) and "waiver" in desc_lower:
-            return "out"
-        
-        # Regla 15: Palabras clave de entrada
+        # Regla 8: Palabras clave específicas de entrada (independiente de sección)
         if any(keyword in desc_lower for keyword in [
-            "deposit", "credit", "received", "pmt info:"
+            "deposit", "credit", "received", "cashreward"
         ]):
             return "in"
         
-        # Regla 16: Si contiene beneficiario (BNF:), probablemente es salida
-        if "bnf:" in desc_lower:
+        # Regla 9: Wire rewards waivers son metadatos (salida neutra)
+        if ("preferred rewards" in desc_lower or "prfd rwds" in desc_lower) and "waiver" in desc_lower:
             return "out"
         
-        # Regla 17: Cualquier cosa con DES: y patrones de ACH que no sea transfer explícito
-        if "des:" in desc_lower and "transfer" not in desc_lower and "wise" not in desc_lower:
-            return "in"
-        
-        # Por defecto, usar contexto de sección si está disponible
+        # PRIORIDAD 2: Usar contexto de sección para todo lo demás
+        # Si estamos en una sección específica, confiar en esa clasificación
         if section_context == "deposits":
             return "in"
         elif section_context == "withdrawals":
             return "out"
         
-        # Sin contexto, ser conservador
+        # PRIORIDAD 3: Reglas de fallback solo si no hay contexto
+        
+        # Transfers con "confirmation#" - asumir salida por defecto
+        if "transfer" in desc_lower and "confirmation#" in desc_lower:
+            return "out"
+        
+        # Online Banking - asumir salida por defecto  
+        if ("online banking" in desc_lower and any(kw in desc_lower for kw in ["payment", "transfer"])):
+            return "out"
+        
+        # Wise Inc - asumir entrada por defecto si no hay contexto
+        if "wise inc" in desc_lower:
+            if "-" in description:
+                return "out"
+            else:
+                return "in"
+        
+        # ONTOP Holdings como entrada
+        if "ontop holdings" in desc_lower:
+            return "in"
+        
+        # Patrones ACH específicos SOLO para casos muy claros (no DES:PAYMENT genérico)
+        if ("des:" in desc_lower and 
+            any(pattern in desc_lower for pattern in ["alejandr", "leonardo"]) and
+            "payment" not in desc_lower):
+            return "in"
+        
+        # Account verification - analizar por contexto
+        if "acctverify" in desc_lower or "des:acctverify" in desc_lower:
+            if "-" in description:
+                return "out"
+            else:
+                return "in"
+        
+        # Si contiene beneficiario (BNF:), probablemente es salida
+        if "bnf:" in desc_lower:
+            return "out"
+        
+        # Sin contexto y sin reglas específicas, ser conservador
         return "out"
