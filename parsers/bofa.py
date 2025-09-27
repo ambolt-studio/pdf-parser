@@ -94,7 +94,8 @@ class BOFAParser(BaseBankParser):
             "subtotal for card", "continued on", "beginning balance", 
             "ending balance", "average ledger", "your adv plus banking",
             "deposits and other additions", "atm and debit card subtractions",
-            "other subtractions", "withdrawals and other subtractions"
+            "other subtractions", "withdrawals and other subtractions",
+            "business advantage fundamentals"
         ]
         
         # Solo filtrar si la línea EMPIEZA con estos patrones o los contiene como línea completa
@@ -184,13 +185,25 @@ class BOFAParser(BaseBankParser):
         ]):
             return "out"
         
-        # Regla 8: Transfers con "confirmation#" son salidas
+        # Regla 8: Transfers con "confirmation#" - depende del contexto
         if "transfer" in desc_lower and "confirmation#" in desc_lower:
-            return "out"
+            if section_context == "deposits":
+                return "in"
+            elif section_context == "withdrawals":
+                return "out"
+            else:
+                # Sin contexto, asumir salida por defecto
+                return "out"
         
-        # Regla 9: Online Banking payments son salidas
+        # Regla 9: Online Banking - depende del contexto de sección
         if ("online banking" in desc_lower and any(kw in desc_lower for kw in ["payment", "transfer"])):
-            return "out"
+            if section_context == "deposits":
+                return "in"
+            elif section_context == "withdrawals":
+                return "out"
+            else:
+                # Sin contexto, asumir salida por defecto
+                return "out"
         
         # Regla 10: Wise Inc - depende del contexto de sección
         if "wise inc" in desc_lower:
