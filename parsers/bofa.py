@@ -22,12 +22,12 @@ RE_NO_TX = re.compile(
     r"beginning\s+balance|ending\s+balance|average\s+ledger|daily\s+ledger\s+balances|"
     r"important\s+information|bank\s+deposit\s+accounts|preferred\s+rewards|"
     r"your\s+checking\s+account|congratulations|monthly\s+fee|bank\s+of\s+america|"
-    r"date\s+balance|balance\s+\(\$\)|baxsan,\s+llc|account\s+#)",
+    r"date\s+balance|balance\s+\(\$\)|baxsan,\s+llc|account\s+#|date\s+description\s+amount)",
     re.I
 )
 
-# Detectar líneas de balance diario
-RE_DAILY_BALANCE = re.compile(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s+\d{1,2}/\d{1,2}", re.I)
+# Detectar líneas de balance diario - REGEX MÁS ESTRICTO
+RE_DAILY_BALANCE = re.compile(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s+\d{1,2}/\d{1,2}\s*$", re.I)
 
 def _parse_bofa_date(date_str: str, year: int) -> str | None:
     """
@@ -87,7 +87,7 @@ def _is_valid_transaction_line(line: str) -> bool:
         "bank of america", "your checking account", "preferred rewards",
         "customer service information", "important information",
         "account summary", "daily ledger balances", "baxsan, llc",
-        "date balance", "balance ($)"
+        "date balance", "balance ($)", "date description amount"
     ]):
         return False
     
@@ -99,8 +99,12 @@ def _is_valid_transaction_line(line: str) -> bool:
     ]):
         return False
     
-    # Filtrar balances diarios (formato: "10/01 53,688.17 10/15")
+    # Filtrar balances diarios con regex más estricto
     if RE_DAILY_BALANCE.search(line):
+        return False
+    
+    # Filtrar líneas que son solo balance diario (patrón: fecha balance fecha)
+    if re.match(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s+\d{1,2}/\d{1,2}", line):
         return False
     
     # Líneas muy cortas probablemente no son transacciones
@@ -111,12 +115,12 @@ def _is_valid_transaction_line(line: str) -> bool:
 
 def _determine_direction_from_content(description: str) -> str | None:
     """
-    Determina la dirección basada en el contenido de la descripción,
-    independientemente de la sección.
+    Determina la dirección basada en el contenido de la descripción.
+    FORZAR que WIRE IN siempre sea "in" independientemente de la sección.
     """
     desc_lower = description.lower()
     
-    # Wire transfers entrantes
+    # Wire transfers entrantes - PRIORITARIO
     if "wire type:wire in" in desc_lower:
         return "in"
     
@@ -135,10 +139,6 @@ def _determine_direction_from_content(description: str) -> str | None:
     # Transfers salientes
     if "transfer" in desc_lower and any(out_indicator in desc_lower for out_indicator in ["to chk", "confirmation#"]):
         return "out"
-    
-    # Account verification (pueden ser entrada o salida, usar sección)
-    if "acctverify" in desc_lower or "gusto" in desc_lower:
-        return None  # Usar dirección de la sección
         
     return None  # Usar dirección de la sección
 
@@ -153,6 +153,9 @@ class BOFAParser(BaseBankParser):
         current_section = None  # "in", "out", o None
         i, n = 0, len(lines)
         
+        # Debug: print lines to understand structure
+        print(f"Processing {n} lines...")
+        
         while i < n:
             line = lines[i]
             
@@ -160,22 +163,32 @@ class BOFAParser(BaseBankParser):
                 i += 1
                 continue
             
-            # Detectar cambio de sección
+            # Debug: detectar cambio de sección
             if RE_DEPOSITS_SECTION.search(line):
                 current_section = "in"
+                print(f"Found DEPOSITS section at line {i}: {line[:50]}...")
                 i += 1
                 continue
             elif RE_WITHDRAWALS_SECTION.search(line):
-                current_section = "out"
+                current_section = "out" 
+                print(f"Found WITHDRAWALS section at line {i}: {line[:50]}...")
                 i += 1
                 continue
             elif RE_SERVICE_FEES_SECTION.search(line):
                 current_section = "out"  # Los fees son salidas
+                print(f"Found SERVICE FEES section at line {i}: {line[:50]}...")
                 i += 1
                 continue
             
             # Saltar ruido y balances diarios
-            if RE_NO_TX.search(line) or not _is_valid_transaction_line(line):
+            if RE_NO_TX.search(line):
+                i += 1
+                continue
+                
+            if not _is_valid_transaction_line(line):
+                # Debug: mostrar líneas filtradas que parecen balances diarios
+                if RE_DAILY_BALANCE.search(line):
+                    print(f"Filtered daily balance: {line}")
                 i += 1
                 continue
             
@@ -225,15 +238,20 @@ class BOFAParser(BaseBankParser):
             # Limpiar descripción
             description = _clean_description(full_transaction_text)
             
-            # Determinar dirección: primero intentar por contenido, luego por sección
+            # Determinar dirección: primero por contenido, luego por sección
             direction = _determine_direction_from_content(description)
             if direction is None:
                 direction = current_section
             
             # Si aún no tenemos dirección, saltar esta transacción
             if direction is None:
+                print(f"No direction found for: {description[:50]}...")
                 i = j
                 continue
+            
+            # Debug: mostrar wire transfers para verificar dirección
+            if "wire type:" in description.lower():
+                print(f"Wire transfer: {direction} - {description[:80]}...")
             
             # Agregar transacción
             results.append({
@@ -245,4 +263,5 @@ class BOFAParser(BaseBankParser):
             
             i = j
         
+        print(f"Processed {len(results)} transactions")
         return results
