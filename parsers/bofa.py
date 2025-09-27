@@ -15,15 +15,19 @@ RE_DEPOSITS_SECTION = re.compile(r"deposits\s+and\s+other\s+credits", re.I)
 RE_WITHDRAWALS_SECTION = re.compile(r"withdrawals\s+and\s+other\s+debits", re.I)
 RE_SERVICE_FEES_SECTION = re.compile(r"service\s+fees", re.I)
 
-# Headers y ruido que no son transacciones
+# Headers y ruido que no son transacciones - MEJORADO
 RE_NO_TX = re.compile(
     r"(?:total\s+deposits|total\s+withdrawals|total\s+service\s+fees|subtotal\s+for\s+card|"
     r"continued\s+on\s+the\s+next\s+page|page\s+\d+\s+of\s+\d+|account\s+summary|"
     r"beginning\s+balance|ending\s+balance|average\s+ledger|daily\s+ledger\s+balances|"
     r"important\s+information|bank\s+deposit\s+accounts|preferred\s+rewards|"
-    r"your\s+checking\s+account|congratulations|monthly\s+fee|bank\s+of\s+america)",
+    r"your\s+checking\s+account|congratulations|monthly\s+fee|bank\s+of\s+america|"
+    r"date\s+balance|balance\s+\(\$\)|baxsan,\s+llc|account\s+#)",
     re.I
 )
+
+# Detectar líneas de balance diario
+RE_DAILY_BALANCE = re.compile(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s+\d{1,2}/\d{1,2}", re.I)
 
 def _parse_bofa_date(date_str: str, year: int) -> str | None:
     """
@@ -68,6 +72,7 @@ def _clean_description(text: str) -> str:
     
     # Remover texto común de BOFA
     cleaned = re.sub(r"\s*continued\s+on\s+the\s+next\s+page\s*$", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\s*total\s+deposits\s+and\s+other\s+credits\s*$", "", cleaned, flags=re.I)
     
     return cleaned.strip()
 
@@ -81,7 +86,8 @@ def _is_valid_transaction_line(line: str) -> bool:
     if any(header in line_lower for header in [
         "bank of america", "your checking account", "preferred rewards",
         "customer service information", "important information",
-        "account summary", "daily ledger balances"
+        "account summary", "daily ledger balances", "baxsan, llc",
+        "date balance", "balance ($)"
     ]):
         return False
     
@@ -93,11 +99,48 @@ def _is_valid_transaction_line(line: str) -> bool:
     ]):
         return False
     
+    # Filtrar balances diarios (formato: "10/01 53,688.17 10/15")
+    if RE_DAILY_BALANCE.search(line):
+        return False
+    
     # Líneas muy cortas probablemente no son transacciones
     if len(line.strip()) < 15:
         return False
         
     return True
+
+def _determine_direction_from_content(description: str) -> str | None:
+    """
+    Determina la dirección basada en el contenido de la descripción,
+    independientemente de la sección.
+    """
+    desc_lower = description.lower()
+    
+    # Wire transfers entrantes
+    if "wire type:wire in" in desc_lower:
+        return "in"
+    
+    # Wire transfers salientes
+    if "wire type:wire out" in desc_lower or "wire type:intl out" in desc_lower:
+        return "out"
+    
+    # Fees y charges (siempre salida)
+    if any(fee in desc_lower for fee in ["fee", "charge", "service ref"]):
+        return "out"
+    
+    # Checkcard transactions (siempre salida)
+    if "checkcard" in desc_lower:
+        return "out"
+    
+    # Transfers salientes
+    if "transfer" in desc_lower and any(out_indicator in desc_lower for out_indicator in ["to chk", "confirmation#"]):
+        return "out"
+    
+    # Account verification (pueden ser entrada o salida, usar sección)
+    if "acctverify" in desc_lower or "gusto" in desc_lower:
+        return None  # Usar dirección de la sección
+        
+    return None  # Usar dirección de la sección
 
 class BOFAParser(BaseBankParser):
     key = "bofa"
@@ -131,14 +174,14 @@ class BOFAParser(BaseBankParser):
                 i += 1
                 continue
             
-            # Saltar ruido
+            # Saltar ruido y balances diarios
             if RE_NO_TX.search(line) or not _is_valid_transaction_line(line):
                 i += 1
                 continue
             
             # Buscar fecha al inicio de la línea
             date = _parse_bofa_date(line, year)
-            if not date or not current_section:
+            if not date:
                 i += 1
                 continue
             
@@ -182,12 +225,22 @@ class BOFAParser(BaseBankParser):
             # Limpiar descripción
             description = _clean_description(full_transaction_text)
             
+            # Determinar dirección: primero intentar por contenido, luego por sección
+            direction = _determine_direction_from_content(description)
+            if direction is None:
+                direction = current_section
+            
+            # Si aún no tenemos dirección, saltar esta transacción
+            if direction is None:
+                i = j
+                continue
+            
             # Agregar transacción
             results.append({
                 "date": date,
                 "description": description,
                 "amount": amount,
-                "direction": current_section
+                "direction": direction
             })
             
             i = j
