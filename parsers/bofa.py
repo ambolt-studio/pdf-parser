@@ -69,7 +69,9 @@ class BOFAParser(BaseBankParser):
             "account #", "date description amount",
             "total deposits", "total withdrawals", "total service fees",
             "subtotal for card", "continued on", "beginning balance", 
-            "ending balance", "average ledger"
+            "ending balance", "average ledger", "your adv plus banking",
+            "deposits and other additions", "atm and debit card subtractions",
+            "other subtractions", "withdrawals and other subtractions"
         ]
         
         # Solo filtrar si la línea EMPIEZA con estos patrones o los contiene como línea completa
@@ -135,36 +137,50 @@ class BOFAParser(BaseBankParser):
             "wire type:fx out" in desc_lower):
             return "out"
         
-        # Regla 3: Fees y charges siempre son salidas
+        # Regla 3: Zelle payments FROM alguien son entradas
+        if ("zelle payment from" in desc_lower):
+            return "in"
+        
+        # Regla 4: Zelle payments TO alguien son salidas
+        if ("zelle payment to" in desc_lower):
+            return "out"
+        
+        # Regla 5: Transfers FROM alguien (via WISE) son entradas
+        if ("transfer" in desc_lower and "from" in desc_lower and "via wise" in desc_lower):
+            return "in"
+        
+        # Regla 6: Fees y charges siempre son salidas
         if any(keyword in desc_lower for keyword in [
-            "fee", "charge", "svc charge", "monthly fee"
+            "fee", "charge", "svc charge", "monthly fee", "international transaction fee"
         ]):
             return "out"
         
-        # Regla 4: Checkcard transactions siempre son salidas
-        if "checkcard" in desc_lower:
+        # Regla 7: Checkcard, purchase, mobile purchase siempre son salidas
+        if any(keyword in desc_lower for keyword in [
+            "checkcard", "purchase", "mobile purchase"
+        ]):
             return "out"
         
-        # Regla 5: Transfers con "confirmation#" son salidas
+        # Regla 8: Transfers con "confirmation#" son salidas
         if "transfer" in desc_lower and "confirmation#" in desc_lower:
             return "out"
         
-        # Regla 6: Online Banking transfers son salidas
-        if "online banking transfer" in desc_lower:
+        # Regla 9: Online Banking payments son salidas
+        if ("online banking" in desc_lower and any(kw in desc_lower for kw in ["payment", "transfer"])):
             return "out"
         
-        # Regla 7: Servicios de pago conocidos como entradas
+        # Regla 10: Servicios de pago conocidos como entradas
         if any(service in desc_lower for service in [
             "wise inc", "ontop holdings"
         ]):
             return "in"
         
-        # Regla 8: Patrones ACH con descripciones específicas de entrada
+        # Regla 11: Patrones ACH con descripciones específicas de entrada
         if ("des:" in desc_lower and 
-            any(pattern in desc_lower for pattern in ["payments", "alejandr", "leonardo"])):
+            any(pattern in desc_lower for pattern in ["payments", "alejandr", "leonardo", "wise"])):
             return "in"
         
-        # Regla 9: Account verification - analizar por contexto
+        # Regla 12: Account verification - analizar por contexto
         if "acctverify" in desc_lower or "des:acctverify" in desc_lower:
             # Si tiene signo negativo en la línea original, es salida
             if "-" in description:
@@ -172,21 +188,21 @@ class BOFAParser(BaseBankParser):
             else:
                 return "in"
         
-        # Regla 10: Wire rewards waivers son metadatos (salida neutra)
-        if "prfd rwds" in desc_lower and "waiver" in desc_lower:
+        # Regla 13: Wire rewards waivers son metadatos (salida neutra)
+        if ("preferred rewards" in desc_lower or "prfd rwds" in desc_lower) and "waiver" in desc_lower:
             return "out"
         
-        # Regla 11: Palabras clave de entrada
+        # Regla 14: Palabras clave de entrada
         if any(keyword in desc_lower for keyword in [
             "deposit", "credit", "received", "pmt info:"
         ]):
             return "in"
         
-        # Regla 12: Si contiene beneficiario (BNF:), probablemente es salida
+        # Regla 15: Si contiene beneficiario (BNF:), probablemente es salida
         if "bnf:" in desc_lower:
             return "out"
         
-        # Regla 13: Cualquier cosa con DES: y patrones de ACH que no sea transfer
+        # Regla 16: Cualquier cosa con DES: y patrones de ACH que no sea transfer explícito
         if "des:" in desc_lower and "transfer" not in desc_lower:
             return "in"
         
