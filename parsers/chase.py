@@ -70,6 +70,7 @@ class ChaseParser(BaseBankParser):
         """Detect which section of the statement we're in"""
         line_lower = line.lower().strip()
         
+        # Standard Chase sections (Spanish/English)
         if any(pattern in line_lower for pattern in [
             "depósitos y adiciones", "deposits and additions"
         ]):
@@ -82,6 +83,14 @@ class ChaseParser(BaseBankParser):
         
         if line_lower == "cargos" or line_lower == "charges":
             return "fees"
+        
+        # ATM and Debit Card sections (these are withdrawals)
+        if any(pattern in line_lower for pattern in [
+            "atm & debit card withdrawals", 
+            "atm and debit card withdrawals",
+            "card purchases"
+        ]):
+            return "withdrawals"
         
         return None
     
@@ -101,12 +110,16 @@ class ChaseParser(BaseBankParser):
         basic_noise = [
             "jpmorgan chase bank",
             "página", "page",
-            "número de cuenta",
-            "total de depósitos",
-            "total de retiros", 
-            "total comisiones",
-            "saldo inicial",
-            "saldo final"
+            "número de cuenta", "account number",
+            "total de depósitos", "total deposits",
+            "total de retiros", "total withdrawals", 
+            "total comisiones", "total fees",
+            "saldo inicial", "beginning balance",
+            "saldo final", "ending balance",
+            "duplicate statement",
+            "customer service information",
+            "checking summary",
+            "how to avoid the monthly service fee"
         ]
         
         for pattern in basic_noise:
@@ -119,6 +132,12 @@ class ChaseParser(BaseBankParser):
             
         # Account numbers only
         if re.match(r"^\s*\d{12,}\s*$", line):
+            return True
+        
+        # Very specific legal disclaimer start
+        if line_lower.startswith("en caso de errores o preguntas sobre sus transferencias electrónicas"):
+            return True
+        if line_lower.startswith("in case of errors or questions about your electronic funds transfers"):
             return True
         
         return False
@@ -171,7 +190,7 @@ class ChaseParser(BaseBankParser):
         if not description or len(description) < 5:
             return None
         
-        # Determine direction
+        # Determine direction with improved logic
         direction = self._determine_direction(description, section_context, amount, full_text)
         if not direction:
             return None
@@ -190,10 +209,11 @@ class ChaseParser(BaseBankParser):
         # Legal content indicators
         legal_indicators = [
             "llámenos al 1-866-564-2262",
+            "call us at 1-866-564-2262",
             "en caso de errores o preguntas sobre sus transferencias",
+            "in case of errors or questions about your electronic funds transfers",
             "prepárese para proporcionarnos la siguiente información",
-            "investigaremos su reclamo y corregiremos",
-            "para cuentas de negocios, consulte su contrato"
+            "be prepared to give us the following information"
         ]
         
         # If it contains any legal indicators, it's legal content
@@ -247,6 +267,7 @@ class ChaseParser(BaseBankParser):
         
         # Remove common noise phrases that sometimes get included
         cleaned = re.sub(r"\s*fecha\s+cantidad\s*", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s*date\s+amount\s*", "", cleaned, flags=re.I)
         
         # Clean whitespace
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -258,17 +279,50 @@ class ChaseParser(BaseBankParser):
         return cleaned
     
     def _determine_direction(self, description: str, section_context: str, amount: float, full_text: str) -> Optional[str]:
-        """Determine transaction direction using section context as primary method"""
+        """Determine transaction direction with improved logic for card transactions"""
+        desc_lower = description.lower()
         
-        # PRIORITY 1: Use section context (Chase's clear structure)
+        # PRIORITY 1: Specific transaction type patterns (override section context)
+        
+        # Card purchases and withdrawals are always OUT
+        if any(pattern in desc_lower for pattern in [
+            "card purchase", "card withdrawal", "compra con tarjeta",
+            "recurring card purchase", "lyft", "atlantic broadband", 
+            "harvard business serv"
+        ]):
+            return "out"
+        
+        # Deposits are always IN
+        if "deposit" in desc_lower or "depósito" in desc_lower:
+            return "in"
+        
+        # Payments and transfers OUT
+        if any(pattern in desc_lower for pattern in [
+            "payment to", "zelle payment to", "online payment",
+            "pago a", "transferencia a"
+        ]):
+            return "out"
+        
+        # Direct debits and ACH OUT
+        if any(pattern in desc_lower for pattern in [
+            "direct debit", "débito directo", "orig co name",
+            "elec pymt", "ach debit"
+        ]):
+            return "out"
+        
+        # Fees and charges OUT
+        if any(pattern in desc_lower for pattern in [
+            "fee", "charge", "cargo", "counter check", "comisión"
+        ]):
+            return "out"
+        
+        # PRIORITY 2: Use section context (Chase's structure)
         if section_context == "deposits":
             return "in"
-        elif section_context == "withdrawals":
-            return "out"
-        elif section_context == "fees":
+        elif section_context in ["withdrawals", "fees"]:
             return "out"
         
-        # PRIORITY 2: Amount sign fallback
+        # PRIORITY 3: Amount sign fallback
         if amount < 0:
             return "out"
         elif amount > 0:
