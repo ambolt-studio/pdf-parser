@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script for Chase parser
+Test script for Chase parser - Updated with direction classification tests
 """
 
 import sys
@@ -46,13 +46,102 @@ def test_chase_parser_in_registry():
     assert parser.key == "chase"
     print("✅ Chase parser registry test passed")
 
+def test_chase_section_detection():
+    """Test Chase section detection for proper direction classification"""
+    try:
+        from parsers.chase import ChaseParser
+        parser = ChaseParser()
+        
+        # Test section detection
+        sections = [
+            ("DEPÓSITOS Y ADICIONES", "deposits"),
+            ("RETIROS ELECTRÓNICOS", "withdrawals"), 
+            ("CARGOS", "fees"),
+            ("DETALLE DE TRANSACCIONES", "transactions")
+        ]
+        
+        print("Testing section detection:")
+        for line, expected in sections:
+            detected = parser._detect_section(line)
+            print(f"  '{line}' → '{detected}' (expected: '{expected}')")
+            assert detected == expected, f"Expected '{expected}', got '{detected}'"
+        
+        print("✅ Chase section detection test passed")
+    except Exception as e:
+        print(f"❌ Chase section detection test failed: {e}")
+        return False
+    return True
+
+def test_chase_direction_classification():
+    """Test Chase direction classification using section context"""
+    try:
+        from parsers.chase import ChaseParser
+        parser = ChaseParser()
+        
+        # Test cases based on real Chase statement
+        test_cases = [
+            # DEPÓSITOS Y ADICIONES section - all should be IN
+            {
+                "description": "Transferencia electrÓnica bancaria entrante. Book transfer Credit",
+                "section": "deposits",
+                "amount": 16236,
+                "expected": "in"
+            },
+            {
+                "description": "ReversiÓn de cargo miscelÁneo. Fee reversal",
+                "section": "deposits", 
+                "amount": 40,
+                "expected": "in"
+            },
+            # RETIROS ELECTRÓNICOS section - all should be OUT
+            {
+                "description": "transferencia electrÓnica bancaria saliente. Online international wire transfer",
+                "section": "withdrawals",
+                "amount": 43572,
+                "expected": "out"
+            },
+            # CARGOS section - all should be OUT (fees charged to account)
+            {
+                "description": "Cargo por transferencia electrÓnica bancaria internacional entrante. International incoming wire fee",
+                "section": "fees",
+                "amount": 15,
+                "expected": "out"
+            },
+            {
+                "description": "Cargo por transferencia electrÓnica bancaria nacional entrante. Domestic incoming wire fee",
+                "section": "fees",
+                "amount": 15,
+                "expected": "out"
+            }
+        ]
+        
+        print("Testing direction classification:")
+        for case in test_cases:
+            direction = parser._determine_direction(
+                case["description"], 
+                case["section"], 
+                case["amount"], 
+                case["description"]
+            )
+            status = "✅" if direction == case["expected"] else "❌"
+            print(f"  {status} {case['section']} section: {direction} (expected: {case['expected']})")
+            if direction != case["expected"]:
+                print(f"     Description: {case['description'][:50]}...")
+            assert direction == case["expected"], f"Expected '{case['expected']}', got '{direction}'"
+        
+        print("✅ Chase direction classification test passed")
+    except Exception as e:
+        print(f"❌ Chase direction classification test failed: {e}")
+        return False
+    return True
+
 def test_chase_parser_with_sample():
     """Test Chase parser with sample transaction data"""
     # Sample lines that would come from a Chase PDF
     sample_lines = [
         "JPMorgan Chase Bank, N.A.",
         "CHASE TOTAL CHECKING",
-        "DETALLE DE TRANSACCIONES",
+        "DETALLE DE TRANSACCIONES", 
         "FECHA DESCRIPCIÓN CANTIDAD SALDO",
         "Saldo inicial $8,879.37",
         "11/06 DÉbito de cÁmara de compensaciÓn automatizada. Wise US inc wise",
@@ -67,12 +156,6 @@ def test_chase_parser_with_sample():
     try:
         from parsers.chase import ChaseParser
         parser = ChaseParser()
-        
-        # For testing, we'll simulate the extract_lines function
-        # In real usage, this would parse actual PDF bytes
-        print("Sample text for parsing:")
-        print(sample_text)
-        print("\nParsing simulation...")
         
         # Test key components
         year = 2024
@@ -113,16 +196,48 @@ def test_chase_parser_with_sample():
     
     return True
 
+def test_chase_noise_filtering():
+    """Test that Chase parser properly filters PDF markup and noise"""
+    try:
+        from parsers.chase import ChaseParser
+        parser = ChaseParser()
+        
+        noise_lines = [
+            "*start*summary",
+            "*end*deposits and additions", 
+            "dailyendingbalance2",
+            "Total de depósitos y adiciones",
+            "JPMorgan Chase Bank, N.A.",
+            "Página 1 de 4",
+            "000000601738035",
+            "trn:"
+        ]
+        
+        print("Testing noise filtering:")
+        for line in noise_lines:
+            is_noise = parser._is_noise_line(line)
+            print(f"  '{line}' → {'filtered' if is_noise else 'kept'}")
+            assert is_noise, f"Expected '{line}' to be filtered as noise"
+        
+        print("✅ Chase noise filtering test passed")
+    except Exception as e:
+        print(f"❌ Chase noise filtering test failed: {e}")
+        return False
+    return True
+
 def run_all_tests():
     """Run all Chase parser tests"""
-    print("Running Chase Parser Tests")
+    print("Running Enhanced Chase Parser Tests")
     print("=" * 50)
     
     tests = [
         test_chase_detection,
         test_chase_parser_creation,
         test_chase_parser_in_registry,
-        test_chase_parser_with_sample
+        test_chase_section_detection,
+        test_chase_direction_classification,
+        test_chase_parser_with_sample,
+        test_chase_noise_filtering
     ]
     
     passed = 0
