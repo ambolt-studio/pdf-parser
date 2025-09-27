@@ -60,20 +60,22 @@ class BOFAParser(BaseBankParser):
         """Filtrar líneas que claramente no son transacciones"""
         line_lower = line.lower()
         
-        # Headers y títulos
+        # Headers y títulos - MÁS ESPECÍFICOS
         noise_patterns = [
             "bank of america", "your checking account", "account summary", 
             "deposits and other credits", "withdrawals and other debits", 
             "service fees", "daily ledger balances", "preferred rewards",
             "important information", "customer service", "page ", " of ",
-            "the happy shrimp llc", "account #", "date description amount",
+            "account #", "date description amount",
             "total deposits", "total withdrawals", "total service fees",
             "subtotal for card", "continued on", "beginning balance", 
             "ending balance", "average ledger"
         ]
         
-        if any(pattern in line_lower for pattern in noise_patterns):
-            return True
+        # Solo filtrar si la línea EMPIEZA con estos patrones o los contiene como línea completa
+        for pattern in noise_patterns:
+            if line_lower.strip() == pattern or line_lower.startswith(pattern):
+                return True
         
         # Filtrar balances diarios: patrón exacto MM/DD balance MM/DD
         if re.match(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s+\d{1,2}/\d{1,2}\s*$", line):
@@ -143,27 +145,24 @@ class BOFAParser(BaseBankParser):
         if "checkcard" in desc_lower:
             return "out"
         
-        # Regla 5: Transfers con "to" o "confirmation#" son salidas
-        if "transfer" in desc_lower and ("to " in desc_lower or "confirmation#" in desc_lower):
+        # Regla 5: Transfers con "confirmation#" son salidas
+        if "transfer" in desc_lower and "confirmation#" in desc_lower:
             return "out"
         
-        # Regla 6: Online Banking transfers son salidas (generalmente)
+        # Regla 6: Online Banking transfers son salidas
         if "online banking transfer" in desc_lower:
             return "out"
         
         # Regla 7: Servicios de pago conocidos como entradas
         if any(service in desc_lower for service in [
-            "wise inc", "ontop holdings", "des:payments", "des:n ", "des:leonardo"
+            "wise inc", "ontop holdings"
         ]):
             return "in"
         
-        # Regla 8: Patrones de ACH/EFT entrantes
-        if any(pattern in desc_lower for pattern in [
-            "des:", "ppd", "ccd", "indn:"
-        ]):
-            # Si no es transfer explícito, probablemente es entrada
-            if "transfer" not in desc_lower:
-                return "in"
+        # Regla 8: Patrones ACH con descripciones específicas de entrada
+        if ("des:" in desc_lower and 
+            any(pattern in desc_lower for pattern in ["payments", "alejandr", "leonardo"])):
+            return "in"
         
         # Regla 9: Account verification - analizar por contexto
         if "acctverify" in desc_lower or "des:acctverify" in desc_lower:
@@ -179,14 +178,17 @@ class BOFAParser(BaseBankParser):
         
         # Regla 11: Palabras clave de entrada
         if any(keyword in desc_lower for keyword in [
-            "deposit", "credit", "received", "payment", "pmt info"
+            "deposit", "credit", "received", "pmt info:"
         ]):
             return "in"
         
-        # Regla 12: Si no matchea ninguna regla específica, analizar contexto
-        # - Si contiene beneficiario (BNF:), probablemente es salida
+        # Regla 12: Si contiene beneficiario (BNF:), probablemente es salida
         if "bnf:" in desc_lower:
             return "out"
         
-        # Por defecto, si no podemos determinar, usar "out" para ser conservadores
+        # Regla 13: Cualquier cosa con DES: y patrones de ACH que no sea transfer
+        if "des:" in desc_lower and "transfer" not in desc_lower:
+            return "in"
+        
+        # Por defecto, usar "out" para ser conservadores
         return "out"
