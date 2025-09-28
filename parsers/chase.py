@@ -180,8 +180,8 @@ class ChaseParser(BaseBankParser):
         if self._contains_legal_content(full_text):
             return None
         
-        # Extract amount
-        amount = self._extract_amount_from_block(block)
+        # Extract amount using improved logic
+        amount = self._extract_amount_from_block_improved(block, full_text)
         if amount is None or amount == 0:
             return None
         
@@ -226,8 +226,100 @@ class ChaseParser(BaseBankParser):
         
         return False
     
+    def _extract_amount_from_block_improved(self, block: List[str], full_text: str) -> Optional[float]:
+        """Extract transaction amount with improved logic to avoid phone numbers"""
+        all_amounts = []
+        
+        for line in block:
+            amounts = RE_AMOUNT.findall(line)
+            all_amounts.extend(amounts)
+        
+        if not all_amounts:
+            return None
+        
+        # Filter out amounts that are likely phone numbers or card numbers
+        valid_amounts = []
+        for amount_str in all_amounts:
+            if self._is_likely_transaction_amount(amount_str, full_text):
+                valid_amounts.append(amount_str)
+        
+        if not valid_amounts:
+            # Fallback to original logic if no valid amounts found
+            valid_amounts = all_amounts
+        
+        # For Chase statements, the transaction amount is typically the last/rightmost amount
+        # This helps avoid phone numbers which usually appear earlier in the line
+        amount_str = valid_amounts[-1] if valid_amounts else all_amounts[0]
+        
+        # Check if negative
+        is_negative = (amount_str.startswith("-") or 
+                      amount_str.startswith("(") or 
+                      amount_str.endswith("-"))
+        
+        # Clean and convert
+        clean = amount_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
+        try:
+            value = float(clean)
+            return -value if is_negative else value
+        except:
+            return None
+    
+    def _is_likely_transaction_amount(self, amount_str: str, full_text: str) -> bool:
+        """Check if an amount string is likely a transaction amount vs phone number/card number"""
+        # Remove formatting to get just the number
+        clean_amount = amount_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
+        
+        try:
+            # Convert to number to check patterns
+            num_value = float(clean_amount)
+            
+            # Very small amounts (under $1) are unlikely to be transaction amounts in business accounts
+            if num_value < 1:
+                return False
+            
+            # Check if this appears to be part of a phone number pattern in the text
+            # Phone numbers often have format like "866-834-2080" or "866.800.4656"
+            if self._appears_in_phone_number(amount_str, full_text):
+                return False
+            
+            # Check if this appears to be a card number (last 4 digits)
+            if self._appears_to_be_card_number(amount_str, full_text):
+                return False
+            
+            return True
+            
+        except:
+            return False
+    
+    def _appears_in_phone_number(self, amount_str: str, full_text: str) -> bool:
+        """Check if amount appears to be part of a phone number"""
+        clean_amount = amount_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
+        
+        # Look for phone number patterns around this amount
+        phone_patterns = [
+            rf"\b{re.escape(clean_amount)}[-.\s]\d{{3,4}}[-.\s]\d{{4}}\b",  # 866-834-2080
+            rf"\b\d{{3}}[-.\s]{re.escape(clean_amount)}[-.\s]\d{{4}}\b",   # Part of phone
+            rf"\b{re.escape(clean_amount)}\.\d{{4}}\b",                     # 866.800.4656
+        ]
+        
+        for pattern in phone_patterns:
+            if re.search(pattern, full_text):
+                return True
+        
+        return False
+    
+    def _appears_to_be_card_number(self, amount_str: str, full_text: str) -> bool:
+        """Check if amount appears to be a card number"""
+        clean_amount = amount_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
+        
+        # Look for "Card XXXX" pattern which is common in Chase statements
+        if re.search(rf"\bCard\s+{re.escape(clean_amount)}\b", full_text, re.I):
+            return True
+        
+        return False
+    
     def _extract_amount_from_block(self, block: List[str]) -> Optional[float]:
-        """Extract transaction amount from the block of lines"""
+        """Extract transaction amount from the block of lines (legacy method)"""
         all_amounts = []
         
         for line in block:
