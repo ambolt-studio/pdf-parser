@@ -2,174 +2,232 @@
 
 ## Problemas Identificados y Solucionados
 
-### 🐛 **Problema 1: Monto Incorrecto en Transacción Latitude**
-
-**Síntoma**: 
-- Transacción: `Card Purchase Latitude On The Riv 866.800.4656 NE Card 3116`
-- **Monto esperado**: $1,254.81
-- **Monto parseado**: $866.80 ❌
-
-**Causa Raíz**:
-El regex `RE_AMOUNT` capturaba múltiples montos: `["866.80", "0.46", "1,254.81"]` y tomaba el primero, que era parte del número de teléfono `866.800.4656`.
-
-**Solución Implementada**:
-1. **Nuevo método `_extract_amount_from_block_improved()`**
-2. **Detección de números de teléfono**: `_appears_in_phone_number()`
-3. **Detección de números de tarjeta**: `_appears_to_be_card_number()`
-4. **Validación de montos**: `_is_likely_transaction_amount()`
-5. **Selección inteligente**: Preferir el monto más a la derecha cuando hay múltiples opciones
-
-```python
-# Antes: Tomaba el primer monto encontrado
-amount_str = all_amounts[0]
-
-# Después: Filtra y toma el último monto válido
-valid_amounts = [amt for amt in all_amounts if self._is_likely_transaction_amount(amt, full_text)]
-amount_str = valid_amounts[-1] if valid_amounts else all_amounts[0]
-```
-
----
+### 🐛 **Problema 1: Monto Incorrecto (Latitude)**
+- **Antes**: $866.80 (número de teléfono)
+- **Después**: $1,254.81 (monto correcto) ✅
 
 ### 🐛 **Problema 2: Transacción Faltante (Waste Mgmt)**
+- **Antes**: Transacción no aparecía en el JSON
+- **Después**: $2,487.82 procesada correctamente ✅
 
-**Síntoma**:
-- Transacción: `Card Purchase Waste Mgmt Wm Ezpay 866-834-2080 TX Card 3116`
-- **Monto**: $2,487.82
-- **Estado**: Completamente ausente del JSON ❌
-
-**Diagnóstico**:
-La transacción debería haber sido procesada correctamente, pero se perdía en algún punto del pipeline.
-
-**Solución Implementada**:
-1. **Refactorización del procesamiento de bloques**
-2. **Mejora en la detección de patrones de teléfono**
-3. **Validación más robusta de montos de transacción**
+### 🐛 **Problema 3: Dirección Incorrecta ACH (NEW)**
+- **Síntoma**: Transacción ACH marcada como "out" cuando debería ser "in"
+- **Ejemplo**: `Orig CO Name:Sanaa Debs...` en sección "DEPOSITS AND ADDITIONS"
+- **Antes**: direction: "out" ❌
+- **Después**: direction: "in" ✅
 
 ---
 
-## Mejoras Técnicas Implementadas
+## Análisis del Problema ACH
 
-### 1. **Detección Inteligente de Números de Teléfono**
+### **Causa Raíz**
+El patrón **"orig co name"** estaba clasificado automáticamente como débito directo ("out"), pero en Chase hay dos tipos de transacciones ACH:
 
-```python
-def _appears_in_phone_number(self, amount_str: str, full_text: str) -> bool:
-    """Detecta si un monto es parte de un número de teléfono"""
-    clean_amount = amount_str.replace("$", "").replace(",", "")
-    
-    phone_patterns = [
-        rf"\b{re.escape(clean_amount)}[-.\s]\d{{3,4}}[-.\s]\d{{4}}\b",  # 866-834-2080
-        rf"\b\d{{3}}[-.\s]{re.escape(clean_amount)}[-.\s]\d{{4}}\b",   # Parte media
-        rf"\b{re.escape(clean_amount)}\.\d{{4}}\b",                     # 866.800.4656
-    ]
-    
-    return any(re.search(pattern, full_text) for pattern in phone_patterns)
+1. **ACH Credit (incoming)** - Alguien envía dinero a tu cuenta
+2. **ACH Debit (outgoing)** - Tu cuenta es debitada
+
+### **Evidencia del Error**
+```json
+// Transacción problemática
+{
+  "date": "2024-03-06",
+  "description": "Orig CO Name:Sanaa Debs Orig ID:T941687665...",
+  "amount": 3000,
+  "direction": "out"  // ❌ INCORRECTO
+}
 ```
 
-### 2. **Detección de Números de Tarjeta**
+**Pruebas de que debería ser "in":**
+- ✅ Aparece en sección **"DEPOSITS AND ADDITIONS"**
+- ✅ Balance aumenta de $3,756.78 a $6,756.78 (+$3,000)
+- ✅ Summary muestra **"Total Deposits and Additions $3,000.00"**
+- ✅ Contiene **"Descr:Sender"** (indica incoming transfer)
+
+---
+
+## Solución Técnica Implementada
+
+### **Nueva Lógica de Clasificación ACH**
 
 ```python
-def _appears_to_be_card_number(self, amount_str: str, full_text: str) -> bool:
-    """Detecta si un monto es un número de tarjeta"""
-    clean_amount = amount_str.replace("$", "").replace(",", "")
-    return re.search(rf"\bCard\s+{re.escape(clean_amount)}\b", full_text, re.I) is not None
+# PRIORITY 2: Handle ACH transactions based on section context
+if "orig co name" in desc_lower:
+    if section_context == "deposits":
+        # ACH Credit - incoming transfer
+        return "in"
+    elif section_context in ["withdrawals", "electronic withdrawals"]:
+        # ACH Debit - outgoing transfer  
+        return "out"
+    # Fallback: analyze description
+    elif any(indicator in desc_lower for indicator in ["descr:sender", "descr:credit"]):
+        return "in"
+    else:
+        return "out"
 ```
 
-### 3. **Validación de Montos de Transacción**
+### **Jerarquía de Decisión Mejorada**
 
-```python
-def _is_likely_transaction_amount(self, amount_str: str, full_text: str) -> bool:
-    """Valida si un monto es realmente una transacción"""
-    try:
-        num_value = float(clean_amount)
-        
-        # Filtros aplicados:
-        if num_value < 1:                                    # Muy pequeño
-            return False
-        if self._appears_in_phone_number(amount_str, full_text):  # Número de teléfono
-            return False
-        if self._appears_to_be_card_number(amount_str, full_text): # Número de tarjeta
-            return False
-            
-        return True
-    except:
-        return False
-```
-
-### 4. **Selección Mejorada de Montos**
-
-```python
-# Para Chase, el monto de transacción típicamente aparece al final de la línea
-amount_str = valid_amounts[-1] if valid_amounts else all_amounts[0]
-```
+1. **Patrones específicos** (Card purchases, Deposits, etc.)
+2. **ACH con contexto de sección** ⭐ **NUEVO**
+3. **Otros débitos directos**
+4. **Contexto de sección general**
+5. **Signo del monto (fallback)**
 
 ---
 
 ## Casos de Prueba
 
-### Test 1: Latitude Transaction
+### **Test 1: ACH Credit en DEPOSITS**
 ```python
-# Input: "06/04 Card Purchase 06/03 Latitude On The Riv 866.800.4656 NE Card 3116 1,254.81"
-# Expected: amount = 1254.81
-# Previous: amount = 866.80 ❌
-# Fixed: amount = 1254.81 ✅
+description = "Orig CO Name:Sanaa Debs...Descr:Sender..."
+section_context = "deposits"
+result = "in"  # ✅ CORRECTO
 ```
 
-### Test 2: Waste Mgmt Transaction
+### **Test 2: ACH Debit en WITHDRAWALS** 
 ```python
-# Input: "06/17 Card Purchase 06/14 Waste Mgmt Wm Ezpay 866-834-2080 TX Card 3116 2,487.82"
-# Expected: Transaction processed
-# Previous: Transaction missing ❌
-# Fixed: Transaction processed ✅
+description = "Orig CO Name:Fpl Direct Debit...Descr:Elec Pymt..."
+section_context = "withdrawals" 
+result = "out"  # ✅ CORRECTO
 ```
 
-### Test 3: Phone Number Detection
+### **Test 3: ACH con Indicador "Sender"**
 ```python
-test_cases = [
-    ("866.80", "866.800.4656", True),    # Parte de teléfono
-    ("834", "866-834-2080", True),       # Parte de teléfono
-    ("1,254.81", "final amount", False), # Monto real
-]
+description = "Orig CO Name:Company ABC Descr:Sender Payment"
+section_context = None
+result = "in"  # ✅ CORRECTO (por "descr:sender")
 ```
 
 ---
 
-## Archivos Modificados
+## Impacto de las Correcciones
 
-1. **`parsers/chase.py`** - Parser principal con correcciones
-2. **`test_chase_fixes.py`** - Tests específicos para verificar las correcciones
+### **Problemas Resueltos**
+- ✅ **Monto correcto** para transacciones con números de teléfono
+- ✅ **Recuperación de transacciones** que se perdían en el procesamiento  
+- ✅ **Clasificación correcta de ACH** basada en contexto de sección
+- ✅ **Compatibilidad total** con formatos existentes
+
+### **Casos Cubiertos**
+- Números de teléfono en descripciones (`866.800.4656`, `866-834-2080`)
+- Números de tarjeta (`Card 3116`)
+- Montos pequeños que no son transacciones (`0.46`)
+- ACH Credits en sección DEPOSITS (incoming money)
+- ACH Debits en sección WITHDRAWALS (outgoing money)
+- Selección inteligente cuando hay múltiples montos en una línea
+
+---
+
+## Archivos Creados/Modificados
+
+### **Principales**
+1. **`parsers/chase.py`** - Parser corregido con nueva lógica ACH
+2. **`test_chase_fixes.py`** - Tests para bugs originales (Latitude, Waste Mgmt)
+3. **`test_chase_ach_fixes.py`** - Tests específicos para corrección ACH
+
+### **Documentación**
+4. **`CHASE_PARSER_BUG_FIXES.md`** - Documentación técnica completa
 
 ---
 
 ## Validación
 
-Ejecutar el test de correcciones:
-
+### **Ejecutar Tests de Bugs Originales**
 ```bash
 python test_chase_fixes.py
 ```
 
-**Output esperado**:
+### **Ejecutar Tests de ACH**
+```bash
+python test_chase_ach_fixes.py
 ```
-🧪 Testing Chase parser bug fixes...
 
-Latitude amount extracted: 1254.81
-✅ All amount extraction fixes are working correctly!
+### **Output Esperado**
+```
+🧪 Testing Chase parser ACH direction fixes...
 
-✅ Phone number detection is working correctly!
-✅ Card number detection is working correctly!
-✅ Transaction amount validation is working correctly!
-✅ Full parsing test passed!
+ACH Credit in DEPOSITS section: in
+ACH Debit in WITHDRAWALS section: out
+ACH with 'descr:sender' indicator: in
+✅ All ACH direction tests passed!
 
-🎉 All tests passed! Chase parser fixes are working correctly.
+Date extracted: 2024-03-06
+Is noise: False
+Processed transaction: {
+  'date': '2024-03-06', 
+  'description': 'Orig CO Name:Sanaa Debs...',
+  'amount': 3000.0, 
+  'direction': 'in'
+}
+✅ Full transaction processing test passed!
+
+🎉 All ACH tests passed! Chase parser ACH fixes are working correctly.
+
+The problematic transaction should now be classified as:
+  Direction: 'in' (instead of 'out')
+  Reason: ACH Credit in DEPOSITS section
 ```
 
 ---
 
-## Impacto
+## Resumen de Mejoras
 
-- ✅ **Monto correcto** para transacciones con números de teléfono
-- ✅ **Recuperación de transacciones** que se perdían en el procesamiento
-- ✅ **Mayor robustez** en la detección de montos válidos
-- ✅ **Compatibilidad total** con el formato existente de Chase
+### **Antes de las Correcciones**
+```json
+[
+  {
+    "date": "2024-06-04",
+    "description": "Card Purchase Latitude On The Riv...",
+    "amount": 866.80,           // ❌ Número de teléfono
+    "direction": "out"
+  },
+  // ❌ Waste Mgmt transaction missing completely
+  {
+    "date": "2024-03-06", 
+    "description": "Orig CO Name:Sanaa Debs...",
+    "amount": 3000,
+    "direction": "out"          // ❌ ACH Credit marcado como outgoing
+  }
+]
+```
 
-Las correcciones mantienen la arquitectura y el comportamiento existente del parser, solo mejorando la precisión en casos específicos problemáticos.
+### **Después de las Correcciones**
+```json
+[
+  {
+    "date": "2024-06-04",
+    "description": "Card Purchase Latitude On The Riv...",
+    "amount": 1254.81,          // ✅ Monto correcto
+    "direction": "out"
+  },
+  {
+    "date": "2024-06-17",
+    "description": "Card Purchase Waste Mgmt...", 
+    "amount": 2487.82,          // ✅ Transacción recuperada
+    "direction": "out"
+  },
+  {
+    "date": "2024-03-06",
+    "description": "Orig CO Name:Sanaa Debs...",
+    "amount": 3000,
+    "direction": "in"           // ✅ ACH Credit correctamente clasificado
+  }
+]
+```
+
+---
+
+## Estado Final
+
+**El parser de Chase ahora maneja correctamente:**
+
+- ✅ Estados de cuenta bilingües (ES/EN)
+- ✅ Transacciones complejas multi-línea  
+- ✅ Clasificación correcta por contexto de sección
+- ✅ Filtrado efectivo de texto legal
+- ✅ Soporte para cuentas personales y empresariales
+- ✅ Wire transfers, ACH Credits/Debits, tarjetas, fees
+- ✅ Detección inteligente de números de teléfono y tarjeta
+- ✅ Selección optimizada de montos de transacción
+
+**Todas las correcciones mantienen compatibilidad total con el sistema existente y solo mejoran la precisión en casos específicos problemáticos.**
