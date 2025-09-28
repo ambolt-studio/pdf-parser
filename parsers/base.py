@@ -3,8 +3,8 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 import pdfplumber
 
-# Regex estricto para montos: requiere 2 decimales, admite $, separadores, signo o paréntesis
-RE_AMOUNT = re.compile(r"\(?-?\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})\)?-?")
+# Regex más específico para montos: debe tener $ o decimales o ser negativo para ser considerado monto
+RE_AMOUNT = re.compile(r"(?:\$\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\(?-\d{1,3}(?:,\d{3})*(?:\.\d{2})?\)?|\d{1,3}(?:,\d{3})*\.\d{2})")
 RE_DATE_SLASH = re.compile(r"^\s*(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")
 RE_DATE_LONG  = re.compile(r"\b([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})\b", re.I)
 RE_DATE_MMMDD = re.compile(r"^\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+(\d{1,2})\b", re.I)
