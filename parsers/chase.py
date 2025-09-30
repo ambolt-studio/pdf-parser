@@ -46,15 +46,24 @@ class ChaseParser(BaseBankParser):
                 i += 1
                 continue
             
-            # Collect transaction block
+            # Collect transaction block - IMPROVED: collect more lines for long descriptions
             transaction_block = [line]
             j = i + 1
+            lines_without_content = 0
             while j < len(lines):
                 next_line = lines[j]
+                # Stop if we hit another date or section header
                 if self._extract_date(next_line, year) or self._is_section_header(next_line):
                     break
+                # Add non-empty lines
                 if next_line.strip() and not self._is_basic_noise(next_line):
                     transaction_block.append(next_line)
+                    lines_without_content = 0
+                else:
+                    lines_without_content += 1
+                    # Stop after 2 consecutive empty/noise lines (end of transaction)
+                    if lines_without_content >= 2:
+                        break
                 j += 1
             
             # Process the transaction block
@@ -188,7 +197,7 @@ class ChaseParser(BaseBankParser):
         if self._is_daily_balance_entry(full_text):
             return None
         
-        # Extract amount - FIXED to prioritize $ amounts
+        # Extract amount - FIXED to prioritize $ amounts and avoid ZIP codes
         amount = self._extract_amount_from_block_improved(block, full_text)
         if amount is None:
             return None
@@ -249,8 +258,10 @@ class ChaseParser(BaseBankParser):
         """
         Extract transaction amount with improved logic.
         
-        CRITICAL FIX: Prioritize amounts with $ sign to avoid capturing account numbers,
-        zip codes, or other numeric data that matches the regex.
+        CRITICAL FIXES:
+        1. Prioritize amounts with $ sign
+        2. Avoid ZIP codes (e.g., 82801-6317 -> 6,31)
+        3. Prefer larger, realistic amounts when multiple candidates exist
         """
         all_amounts = []
         
@@ -265,10 +276,14 @@ class ChaseParser(BaseBankParser):
         dollar_amounts = [amt for amt in all_amounts if amt.startswith("$")]
         
         if dollar_amounts:
-            # Use the first $ amount found (typically the transaction amount)
-            amount_str = dollar_amounts[0]
+            # If multiple $ amounts, prefer the largest (real transaction vs fee/other)
+            if len(dollar_amounts) > 1:
+                amount_str = self._select_best_amount(dollar_amounts, full_text)
+            else:
+                amount_str = dollar_amounts[0]
         else:
-            # PRIORITY 2: Filter amounts that are likely transaction amounts (not phone/card numbers)
+            # PRIORITY 2: Filter amounts that are likely transaction amounts
+            # Exclude: phone numbers, card numbers, ZIP codes
             valid_amounts = []
             for amount_str in all_amounts:
                 if self._is_likely_transaction_amount(amount_str, full_text):
@@ -278,8 +293,8 @@ class ChaseParser(BaseBankParser):
                 # Fallback: use first amount if no valid amounts found
                 valid_amounts = all_amounts
             
-            # Use the first valid amount
-            amount_str = valid_amounts[0]
+            # Select the best amount from valid candidates
+            amount_str = self._select_best_amount(valid_amounts, full_text)
         
         # Check if negative
         is_negative = (amount_str.startswith("-") or 
@@ -294,8 +309,42 @@ class ChaseParser(BaseBankParser):
         except:
             return None
     
+    def _select_best_amount(self, amounts: List[str], full_text: str) -> str:
+        """
+        Select the best amount from multiple candidates.
+        Prefers larger amounts that are more likely to be real transactions.
+        """
+        if not amounts:
+            return amounts[0] if amounts else ""
+        
+        if len(amounts) == 1:
+            return amounts[0]
+        
+        # Convert amounts to float for comparison
+        amount_values = []
+        for amt_str in amounts:
+            clean = amt_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
+            try:
+                value = float(clean)
+                # Prefer amounts > $100 (more likely to be real transactions than fees/fragments)
+                priority = 2 if value > 100 else 1
+                amount_values.append((amt_str, value, priority))
+            except:
+                continue
+        
+        if not amount_values:
+            return amounts[0]
+        
+        # Sort by priority (high to low), then by value (high to low)
+        amount_values.sort(key=lambda x: (x[2], x[1]), reverse=True)
+        
+        return amount_values[0][0]
+    
     def _is_likely_transaction_amount(self, amount_str: str, full_text: str) -> bool:
-        """Check if an amount string is likely a transaction amount vs phone number/card number"""
+        """
+        Check if an amount string is likely a transaction amount.
+        Rejects: phone numbers, card numbers, ZIP codes.
+        """
         # Remove formatting to get just the number
         clean_amount = amount_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
         
@@ -307,8 +356,11 @@ class ChaseParser(BaseBankParser):
             if num_value < 1:
                 return False
             
+            # FIX: Check if this appears to be part of a ZIP code
+            if self._appears_in_zip_code(amount_str, full_text):
+                return False
+            
             # Check if this appears to be part of a phone number pattern in the text
-            # Phone numbers often have format like "866-834-2080" or "866.800.4656"
             if self._appears_in_phone_number(amount_str, full_text):
                 return False
             
@@ -321,14 +373,50 @@ class ChaseParser(BaseBankParser):
         except:
             return False
     
+    def _appears_in_zip_code(self, amount_str: str, full_text: str) -> bool:
+        """
+        NEW FIX: Check if amount appears to be part of a ZIP code.
+        Common formats: 82801-6317, 59901-5635, etc.
+        The regex captures "6,31" from "82801-6317" which becomes 631.
+        """
+        clean_amount = amount_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
+        
+        # ZIP code patterns:
+        # Standard: 82801-6317 (5 digits - 4 digits)
+        # Standard: 59901 (5 digits alone)
+        # The problematic pattern: when "6,31" is extracted from "6317" in ZIP codes
+        
+        # Pattern 1: Check if this number appears in a ZIP+4 format (XXXXX-XXXX)
+        # Example: 82801-6317 -> captures 6,31 as "631"
+        zip_patterns = [
+            # Match: 5digits-{this_number} or {this_number} in ZIP context
+            rf"\b\d{{5}}-\d*{re.escape(clean_amount)}\d*\b",  # 82801-6317
+            rf"\b\d*{re.escape(clean_amount)}\d*-\d{{4}}\b",  # XXX631X-XXXX
+        ]
+        
+        for pattern in zip_patterns:
+            if re.search(pattern, full_text):
+                return True
+        
+        # Pattern 2: Check if number appears in common US state ZIP prefixes followed by this number
+        # Wyoming (82XXX, 83XXX), Montana (59XXX), Florida (33XXX, 34XXX), etc.
+        common_zip_prefixes = ["82", "83", "59", "33", "34", "59", "828", "829"]
+        for prefix in common_zip_prefixes:
+            # Check if text contains patterns like "WY 82801" or "MT 59901"
+            state_zip_pattern = rf"\b(WY|MT|FL|NY|CA)\s+{prefix}\d*{re.escape(clean_amount)}\d*\b"
+            if re.search(state_zip_pattern, full_text, re.I):
+                return True
+        
+        return False
+    
     def _appears_in_phone_number(self, amount_str: str, full_text: str) -> bool:
         """Check if amount appears to be part of a phone number"""
         clean_amount = amount_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
         
         # Look for phone number patterns around this amount
         phone_patterns = [
-            rf"\b{re.escape(clean_amount)}[-.\s]\d{{3,4}}[-.\s]\d{{4}}\b",  # 866-834-2080
-            rf"\b\d{{3}}[-.\s]{re.escape(clean_amount)}[-.\s]\d{{4}}\b",   # Part of phone
+            rf"\b{re.escape(clean_amount)}[-.\\s]\d{{3,4}}[-.\\s]\d{{4}}\b",  # 866-834-2080
+            rf"\b\d{{3}}[-.\\s]{re.escape(clean_amount)}[-.\\s]\d{{4}}\b",   # Part of phone
             rf"\b{re.escape(clean_amount)}\.\d{{4}}\b",                     # 866.800.4656
         ]
         
