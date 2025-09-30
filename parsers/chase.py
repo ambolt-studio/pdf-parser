@@ -47,7 +47,10 @@ class ChaseParser(BaseBankParser):
             # Detect section changes for context
             section_detected = self._detect_section(line)
             if section_detected:
-                current_section = section_detected
+                # CRITICAL FIX: Don't overwrite context with generic "transactions" section
+                # This preserves the withdrawals/deposits context when entering transaction details
+                if section_detected != "transactions":
+                    current_section = section_detected
                 i += 1
                 continue
             
@@ -94,8 +97,8 @@ class ChaseParser(BaseBankParser):
         line_lower = line.lower().strip()
         
         legal_starts = [
-            "en caso de errores o preguntas sobre sus transferencias electrÃ³nicas",
             "en caso de errores o preguntas sobre sus transferencias electrónicas",
+            "en caso de errores o preguntas sobre sus transferencias electrÃ³nicas",
             "in case of errors or questions about your electronic funds transfers",
             "a reminder about incoming wire transfer fees",
             "un recordatorio acerca de los cargos por giro bancario"
@@ -141,22 +144,25 @@ class ChaseParser(BaseBankParser):
         
         # Deposits section
         if any(pattern in line_lower for pattern in [
-            "depÃ³sitos y adiciones", "deposits and additions",
+            "depósitos y adiciones", "deposits and additions",
+            "depÃ³sitos y adiciones",
             "depósitos electrónicos", "electronic deposits",
+            "depósitos electrÃ³nicos",
             "crédito de cámara", "ach credit"
         ]):
             return "deposits"
         
         # Withdrawals section (including Spanish variations)
         if any(pattern in line_lower for pattern in [
-            "retiros electrÃ³nicos", "electronic withdrawals",
-            "retiros electrónicos", "débito de cámara",
+            "retiros electrónicos", "electronic withdrawals",
+            "retiros electrÃ³nicos",
+            "débito de cámara",
             "débito de cÁmara", "dÉbito de cÁmara"  # UTF-8 variations
         ]):
             return "withdrawals"
         
         # Fees section
-        if line_lower == "cargos" or line_lower == "charges":
+        if line_lower == "cargos" or line_lower == "charges" or line_lower == "fees":
             return "fees"
         
         # Transaction details section
@@ -188,11 +194,11 @@ class ChaseParser(BaseBankParser):
         # Enhanced noise patterns with Spanish support
         basic_noise = [
             "jpmorgan chase bank",
-            "pÃ¡gina", "page", "página",
-            "nÃºmero de cuenta", "account number", "número de cuenta",
-            "total de depÃ³sitos", "total deposits", "total de depósitos",
-            "total de retiros", "total withdrawals", "total de retiros",
-            "total comisiones", "total fees", "total comisiones",
+            "página", "page", "pÃ¡gina",
+            "número de cuenta", "account number", "nÃºmero de cuenta",
+            "total de depósitos", "total deposits", "total de depÃ³sitos",
+            "total de retiros", "total withdrawals",
+            "total comisiones", "total fees",
             "saldo inicial", "beginning balance",
             "saldo final", "ending balance",
             "duplicate statement",
@@ -202,19 +208,28 @@ class ChaseParser(BaseBankParser):
             "daily ending balance", "saldo final diario",
             "resumen de cuenta",
             "detalle de transacciones",
+            "fecha descripción cantidad saldo",  # Table header
+            "fecha descripciÃ³n cantidad saldo",
             "información para atención al cliente",
+            "informaciÃ³n para atenciÃ³n al cliente",
             "sitio web:",
             "centro de atención al cliente:",
+            "centro de atenciÃ³n al cliente:",
             "para español:",
+            "para espaÃ±ol:",
             "llamadas internacionales:",
             "chase total checking",
             "chase savings",
             "no se cobró un cargo mensual",
+            "no se cobrÃ³ un cargo mensual",
             "no se aplicó un cargo mensual",
+            "no se aplicÃ³ un cargo mensual",
             "tenga depósitos electrónicos",
+            "tenga depÃ³sitos electrÃ³nicos",
             "mantenga un saldo",
             "rendimiento porcentual anual",
-            "esta página se ha dejado en blanco"
+            "esta página se ha dejado en blanco",
+            "esta pÃ¡gina se ha dejado en blanco"
         ]
         
         for pattern in basic_noise:
@@ -255,11 +270,11 @@ class ChaseParser(BaseBankParser):
         # Skip lines that contain obvious legal text markers
         line_lower = line.lower()
         legal_markers = [
-            "llÃ¡menos al", "llámenos al",
+            "llámenos al", "llÃ¡menos al",
             "call us at", 
             "en caso de errores",
             "in case of errors",
-            "prepÃ¡rese para proporcionar", "prepárese para proporcionar",
+            "prepárese para proporcionar", "prepÃ¡rese para proporcionar",
             "prepare to provide"
         ]
         
@@ -442,7 +457,7 @@ class ChaseParser(BaseBankParser):
             return "out"
         
         # Deposits are always IN
-        if "deposit" in desc_lower or "depÃ³sito" in desc_lower or "depósito" in desc_lower:
+        if "deposit" in desc_lower or "depósito" in desc_lower or "depÃ³sito" in desc_lower:
             return "in"
         
         # Payments and transfers OUT
@@ -479,13 +494,13 @@ class ChaseParser(BaseBankParser):
         
         # Other direct debits and electronic payments OUT
         if any(pattern in desc_lower for pattern in [
-            "direct debit", "dÃ©bito directo", "débito directo", "elec pymt", "ach debit"
+            "direct debit", "débito directo", "dÃ©bito directo", "elec pymt", "ach debit"
         ]):
             return "out"
         
         # Fees and charges OUT
         if any(pattern in desc_lower for pattern in [
-            "fee", "charge", "cargo", "counter check", "comisiÃ³n", "comisión"
+            "fee", "charge", "cargo", "counter check", "comisión", "comisiÃ³n"
         ]):
             return "out"
         
