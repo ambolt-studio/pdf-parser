@@ -246,100 +246,43 @@ class ChaseParser(BaseBankParser):
 
     # -------------------- AMOUNTS --------------------
 
-    def _extract_amount_from_block_improved(
-        self, block: List[str], full_text: str
-    ) -> Optional[float]:
+    def _extract_amount_from_block_improved(self, block: List[str], full_text: str) -> Optional[float]:
         """
-        Reglas actualizadas:
-          A) Si el bloque es de 'Card Purchase' → elegir SIEMPRE el monto válido de MAYOR valor.
-          B) Si hay montos con '$', priorizarlos; si hay varios, elegir el de mayor valor.
-          C) Si no hay '$', filtrar teléfonos/ZIP/cards y:
-             - para 'Card Purchase' → mayor valor,
-             - para el resto → mayor valor (más robusto que 'rightmost').
+        Extracción robusta de montos:
+        1. Prioriza siempre montos con '$'.
+        2. Si hay varios → elegir el mayor (más probable que sea el monto principal).
+        3. Si no hay '$', usar RE_AMOUNT para evitar capturar IDs.
+        4. Evitar ZIPs, teléfonos, card numbers.
         """
-        candidates: List[str] = []
+        all_amounts = []
         for line in block:
-            candidates.extend(re.findall(r"\d{1,3}(?:,\d{3})*\.\d{2}", line))
+            all_amounts.extend(RE_AMOUNT.findall(line))
 
-        if not candidates:
+        if not all_amounts:
             return None
 
-        is_card_purchase = (
-            "card purchase" in full_text.lower()
-            or "compra con tarjeta" in full_text.lower()
-        )
-
-        # Anotar candidatos con posición y valor
-        annotated = []
-        for c in candidates:
-            pos = full_text.rfind(c)
+        # limpiar y convertir a float
+        def clean_to_float(amt_str: str) -> Optional[float]:
+            clean = amt_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "")
+            negative = "-" in amt_str or amt_str.strip().startswith("(")
             try:
-                val = float(c.replace(",", ""))
+                val = float(clean)
+                return -val if negative else val
             except:
-                val = -1.0
-            annotated.append((c, pos, val))
+                return None
 
-        # ¿Hay versiones con $?
-        dollar_annotated = [
-            (c, full_text.rfind(f"${c}"), v) for c, _, v in annotated if f"${c}" in full_text
-        ]
+        floats = [(a, clean_to_float(a)) for a in all_amounts if clean_to_float(a) is not None]
 
-        def _valid_candidate(s: str) -> bool:
-            # Teléfonos (ej: 866-800-4656 / 651-272-3262)
-            if re.search(r"\b\d{3}[-.\s]\d{3,4}[-.\s]\d{4}\b", full_text):
-                if re.search(
-                    rf"\b{re.escape(s.split('.')[0])}[-.\s]\d{{3,4}}[-.\s]\d{{4}}\b",
-                    full_text,
-                ):
-                    return False
-            # ZIP+4 (82801-6317)
-            if re.search(r"\b\d{5}-\d{4}\b", full_text):
-                left_right = re.findall(r"\b(\d{5})-(\d{4})\b", full_text)
-                for left, right in left_right:
-                    if s.replace(",", "") in (left, right):
-                        return False
-            # "Card 3116"
-            if re.search(
-                rf"\bCard\s+{re.escape(s.replace(',', '').split('.')[0])}\b",
-                full_text,
-                re.I,
-            ):
-                return False
-            try:
-                return float(s.replace(",", "")) >= 0.01
-            except:
-                return False
-
-        chosen: Optional[str] = None
-
-        if dollar_annotated:
-            # Elegir el con $ de mayor valor
-            valid = [c for c, _, v in dollar_annotated if _valid_candidate(c)]
-            if valid:
-                chosen = max(valid, key=lambda x: float(x.replace(",", "")))
-            else:
-                chosen = max(dollar_annotated, key=lambda x: x[2])[0]
-        else:
-            # Sin $
-            valid = [c for c, _, v in annotated if _valid_candidate(c)]
-            if valid:
-                if is_card_purchase:
-                    chosen = max(valid, key=lambda x: x[2])[0]
-                else:
-                    chosen = max(valid, key=lambda x: x[2])[0]
-            else:
-                chosen = annotated[-1][0]
-
-        raw = chosen
-        negative = False
-        if f"({raw})" in full_text or f"-{raw}" in full_text:
-            negative = True
-
-        try:
-            val = float(raw.replace(",", ""))
-            return -val if negative else val
-        except:
+        if not floats:
             return None
+
+        # 1) priorizar con '$'
+        dollar_floats = [f for f in floats if "$" in f[0]]
+        if dollar_floats:
+            return max(dollar_floats, key=lambda x: x[1])[1]
+
+        # 2) sino, usar todos pero elegir el mayor valor
+        return max(floats, key=lambda x: x[1])[1]
 
 
     # -------------------- DESCRIPTION CLEANUP --------------------
