@@ -188,7 +188,7 @@ class ChaseParser(BaseBankParser):
         if self._is_daily_balance_entry(full_text):
             return None
         
-        # Extract amount
+        # Extract amount - FIXED to prioritize $ amounts
         amount = self._extract_amount_from_block_improved(block, full_text)
         if amount is None:
             return None
@@ -246,7 +246,12 @@ class ChaseParser(BaseBankParser):
         return False
     
     def _extract_amount_from_block_improved(self, block: List[str], full_text: str) -> Optional[float]:
-        """Extract transaction amount with improved logic to avoid phone numbers"""
+        """
+        Extract transaction amount with improved logic.
+        
+        CRITICAL FIX: Prioritize amounts with $ sign to avoid capturing account numbers,
+        zip codes, or other numeric data that matches the regex.
+        """
         all_amounts = []
         
         for line in block:
@@ -256,19 +261,25 @@ class ChaseParser(BaseBankParser):
         if not all_amounts:
             return None
         
-        # Filter out amounts that are likely phone numbers or card numbers
-        valid_amounts = []
-        for amount_str in all_amounts:
-            if self._is_likely_transaction_amount(amount_str, full_text):
-                valid_amounts.append(amount_str)
+        # PRIORITY 1: Find amounts that start with $ (these are definitely currency)
+        dollar_amounts = [amt for amt in all_amounts if amt.startswith("$")]
         
-        if not valid_amounts:
-            # Fallback to original logic if no valid amounts found
-            valid_amounts = all_amounts
-        
-        # For Chase statements, the transaction amount is typically the last/rightmost amount
-        # This helps avoid phone numbers which usually appear earlier in the line
-        amount_str = valid_amounts[-1] if valid_amounts else all_amounts[0]
+        if dollar_amounts:
+            # Use the first $ amount found (typically the transaction amount)
+            amount_str = dollar_amounts[0]
+        else:
+            # PRIORITY 2: Filter amounts that are likely transaction amounts (not phone/card numbers)
+            valid_amounts = []
+            for amount_str in all_amounts:
+                if self._is_likely_transaction_amount(amount_str, full_text):
+                    valid_amounts.append(amount_str)
+            
+            if not valid_amounts:
+                # Fallback: use first amount if no valid amounts found
+                valid_amounts = all_amounts
+            
+            # Use the first valid amount
+            amount_str = valid_amounts[0]
         
         # Check if negative
         is_negative = (amount_str.startswith("-") or 
