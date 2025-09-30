@@ -246,90 +246,100 @@ class ChaseParser(BaseBankParser):
 
     # -------------------- AMOUNTS --------------------
 
-   def _extract_amount_from_block_improved(self, block: List[str], full_text: str) -> Optional[float]:
-    """
-    Reglas actualizadas:
-      A) Si el bloque es de 'Card Purchase' → elegir SIEMPRE el monto válido de MAYOR valor.
-      B) Si hay montos con '$', priorizarlos; si hay varios, elegir el de mayor valor.
-      C) Si no hay '$', filtrar teléfonos/ZIP/cards y:
-         - para 'Card Purchase' → mayor valor,
-         - para el resto → mayor valor (mejor que 'rightmost' para evitar capturar importes menores).
-    """
-    candidates: List[str] = []
-    for line in block:
-        candidates.extend(re.findall(r"\d{1,3}(?:,\d{3})*\.\d{2}", line))
+    def _extract_amount_from_block_improved(
+        self, block: List[str], full_text: str
+    ) -> Optional[float]:
+        """
+        Reglas actualizadas:
+          A) Si el bloque es de 'Card Purchase' → elegir SIEMPRE el monto válido de MAYOR valor.
+          B) Si hay montos con '$', priorizarlos; si hay varios, elegir el de mayor valor.
+          C) Si no hay '$', filtrar teléfonos/ZIP/cards y:
+             - para 'Card Purchase' → mayor valor,
+             - para el resto → mayor valor (más robusto que 'rightmost').
+        """
+        candidates: List[str] = []
+        for line in block:
+            candidates.extend(re.findall(r"\d{1,3}(?:,\d{3})*\.\d{2}", line))
 
-    if not candidates:
-        return None
+        if not candidates:
+            return None
 
-    is_card_purchase = "card purchase" in full_text.lower() or "compra con tarjeta" in full_text.lower()
+        is_card_purchase = (
+            "card purchase" in full_text.lower()
+            or "compra con tarjeta" in full_text.lower()
+        )
 
-    # Anotar candidatos con posición y valor
-    annotated = []
-    for c in candidates:
-        pos = full_text.rfind(c)
-        try:
-            val = float(c.replace(",", ""))
-        except:
-            val = -1.0
-        annotated.append((c, pos, val))
+        # Anotar candidatos con posición y valor
+        annotated = []
+        for c in candidates:
+            pos = full_text.rfind(c)
+            try:
+                val = float(c.replace(",", ""))
+            except:
+                val = -1.0
+            annotated.append((c, pos, val))
 
-    # ¿Hay versiones con $?
-    dollar_annotated = []
-    for c, _, val in annotated:
-        if f"${c}" in full_text:
-            dollar_annotated.append((c, val))
+        # ¿Hay versiones con $?
+        dollar_annotated = [
+            (c, full_text.rfind(f"${c}"), v) for c, _, v in annotated if f"${c}" in full_text
+        ]
 
-    def _valid_candidate(s: str) -> bool:
-        # Teléfonos (ej: 866-800-4656 / 651-272-3262)
-        if re.search(r"\b\d{3}[-.\s]\d{3,4}[-.\s]\d{4}\b", full_text):
-            if re.search(rf"\b{re.escape(s.split('.')[0])}[-.\s]\d{{3,4}}[-.\s]\d{{4}}\b", full_text):
-                return False
-        # ZIP+4 (82801-6317)
-        if re.search(r"\b\d{5}-\d{4}\b", full_text):
-            left_right = re.findall(r"\b(\d{5})-(\d{4})\b", full_text)
-            for left, right in left_right:
-                if s.replace(",", "") in (left, right):
+        def _valid_candidate(s: str) -> bool:
+            # Teléfonos (ej: 866-800-4656 / 651-272-3262)
+            if re.search(r"\b\d{3}[-.\s]\d{3,4}[-.\s]\d{4}\b", full_text):
+                if re.search(
+                    rf"\b{re.escape(s.split('.')[0])}[-.\s]\d{{3,4}}[-.\s]\d{{4}}\b",
+                    full_text,
+                ):
                     return False
-        # "Card 3116"
-        if re.search(rf"\bCard\s+{re.escape(s.replace(',', '').split('.')[0])}\b", full_text, re.I):
-            return False
-        try:
-            return float(s.replace(",", "")) >= 0.01
-        except:
-            return False
+            # ZIP+4 (82801-6317)
+            if re.search(r"\b\d{5}-\d{4}\b", full_text):
+                left_right = re.findall(r"\b(\d{5})-(\d{4})\b", full_text)
+                for left, right in left_right:
+                    if s.replace(",", "") in (left, right):
+                        return False
+            # "Card 3116"
+            if re.search(
+                rf"\bCard\s+{re.escape(s.replace(',', '').split('.')[0])}\b",
+                full_text,
+                re.I,
+            ):
+                return False
+            try:
+                return float(s.replace(",", "")) >= 0.01
+            except:
+                return False
 
-    # 1) Si hay montos con '$', elegir el de mayor valor válido
-    if dollar_annotated:
-        valid_d = [(c, v) for c, v in dollar_annotated if _valid_candidate(c)]
-        if valid_d:
-            chosen = max(valid_d, key=lambda x: x[1])[0]
-        else:
-            chosen = max(dollar_annotated, key=lambda x: x[1])[0]
-    else:
-        # 2) Sin '$': filtrar inválidos
-        valid = [(c, p, v) for c, p, v in annotated if _valid_candidate(c)]
-        if not valid:
-            # Fallback: mayor por valor entre todos
-            chosen = max(annotated, key=lambda x: x[2])[0]
-        else:
-            if is_card_purchase:
-                # Para Card Purchase → MAYOR valor
-                chosen = max(valid, key=lambda x: x[2])[0]
+        chosen: Optional[str] = None
+
+        if dollar_annotated:
+            # Elegir el con $ de mayor valor
+            valid = [c for c, _, v in dollar_annotated if _valid_candidate(c)]
+            if valid:
+                chosen = max(valid, key=lambda x: float(x.replace(",", "")))
             else:
-                # Para el resto, también mayor valor (más robusto que rightmost)
-                chosen = max(valid, key=lambda x: x[2])[0]
+                chosen = max(dollar_annotated, key=lambda x: x[2])[0]
+        else:
+            # Sin $
+            valid = [c for c, _, v in annotated if _valid_candidate(c)]
+            if valid:
+                if is_card_purchase:
+                    chosen = max(valid, key=lambda x: x[2])[0]
+                else:
+                    chosen = max(valid, key=lambda x: x[2])[0]
+            else:
+                chosen = annotated[-1][0]
 
-    raw = chosen
-    negative = False
-    if f"({raw})" in full_text or f"-{raw}" in full_text:
-        negative = True
+        raw = chosen
+        negative = False
+        if f"({raw})" in full_text or f"-{raw}" in full_text:
+            negative = True
 
-    try:
-        val = float(raw.replace(",", ""))
-        return -val if negative else val
-    except:
-        return None
+        try:
+            val = float(raw.replace(",", ""))
+            return -val if negative else val
+        except:
+            return None
 
 
     # -------------------- DESCRIPTION CLEANUP --------------------
