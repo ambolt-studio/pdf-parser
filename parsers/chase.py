@@ -334,18 +334,27 @@ class ChaseParser(BaseBankParser):
     ) -> str:
         d = description.lower()
 
+        # 1) Reversals SIEMPRE IN
         if re.search(r"\b(reversal|reversi[oó]n)\b", d, re.I):
             return "in"
 
+        # 2) Fees/cargos → OUT (excepto reversals)
+        if any(x in d for x in [" fee", "charge", "cargo", "comisión", "service charge"]):
+            return "out"
+
+        # 3) Créditos claramente IN
         if re.search(r"\b(deposit|credit|incoming|ach credit|wire credit|zelle payment from)\b", d, re.I):
             return "in"
 
+        # 4) Card Purchases → OUT
         if "card purchase" in d or "compra con tarjeta" in d or "recurring card purchase" in d:
             return "out"
 
+        # 5) Wise → OUT
         if "wise us inc" in d or " trnwise " in f" {d} " or re.search(r"\bwise\b", d):
             return "out"
 
+        # 6) Pagos/Transferencias → OUT
         if any(x in d for x in [
             "payment to", "zelle payment to", "online payment",
             "transferencia a", "wire transfer", "online domestic wire transfer",
@@ -353,15 +362,15 @@ class ChaseParser(BaseBankParser):
         ]):
             return "out"
 
+        # 7) Débitos ACH en español → OUT
         if re.search(r"d[eé]bito de c[aá]mara", d):
             return "out"
 
-        if any(x in d for x in [" fee ", " charge ", "cargo", "comisión", "service charge"]):
-            return "out"
-
+        # 8) Contexto de sección
         if section_context == "deposits":
             return "in"
         if section_context in ("withdrawals", "fees"):
             return "out"
 
+        # 9) Fallback por signo
         return "in" if amount > 0 else "out"
