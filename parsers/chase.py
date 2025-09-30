@@ -18,8 +18,8 @@ class ChaseParser(BaseBankParser):
         year = detect_year(full_text)
         results: List[Dict[str, Any]] = []
         
+        # Simplified strategy: focus on section context and basic filtering
         current_section = None
-        in_legal_section = False
         
         i = 0
         while i < len(lines):
@@ -28,34 +28,15 @@ class ChaseParser(BaseBankParser):
                 i += 1
                 continue
             
-            # Check for legal section boundaries
-            if self._is_legal_section_start(line):
-                in_legal_section = True
-                i += 1
-                continue
-                
-            if in_legal_section and self._is_legal_section_end(line):
-                in_legal_section = False
-                i += 1
-                continue
-            
-            # Skip everything inside legal sections
-            if in_legal_section:
-                i += 1
-                continue
-            
             # Detect section changes for context
             section_detected = self._detect_section(line)
             if section_detected:
-                # CRITICAL FIX: Don't overwrite context with generic "transactions" section
-                # This preserves the withdrawals/deposits context when entering transaction details
-                if section_detected != "transactions":
-                    current_section = section_detected
+                current_section = section_detected
                 i += 1
                 continue
             
-            # Basic noise filtering
-            if self._is_noise_line(line):
+            # Basic noise filtering only
+            if self._is_basic_noise(line):
                 i += 1
                 continue
             
@@ -70,16 +51,9 @@ class ChaseParser(BaseBankParser):
             j = i + 1
             while j < len(lines):
                 next_line = lines[j]
-                
-                # Stop if we hit legal section
-                if self._is_legal_section_start(next_line):
-                    break
-                    
-                # Stop at next date or section header
                 if self._extract_date(next_line, year) or self._is_section_header(next_line):
                     break
-                    
-                if next_line.strip() and not self._is_noise_line(next_line):
+                if next_line.strip() and not self._is_basic_noise(next_line):
                     transaction_block.append(next_line)
                 j += 1
             
@@ -92,82 +66,25 @@ class ChaseParser(BaseBankParser):
         
         return results
     
-    def _is_legal_section_start(self, line: str) -> bool:
-        """Detect start of legal disclaimer section"""
-        line_lower = line.lower().strip()
-        
-        legal_starts = [
-            "en caso de errores o preguntas sobre sus transferencias electrónicas",
-            "en caso de errores o preguntas sobre sus transferencias electrÃ³nicas",
-            "in case of errors or questions about your electronic funds transfers",
-            "a reminder about incoming wire transfer fees",
-            "un recordatorio acerca de los cargos por giro bancario"
-        ]
-        
-        return any(line_lower.startswith(legal) for legal in legal_starts)
-    
-    def _is_legal_section_end(self, line: str) -> bool:
-        """Detect end of legal disclaimer section"""
-        line_stripped = line.strip()
-        
-        legal_ends = [
-            "JPMorgan Chase Bank, N.A. Miembro FDIC",
-            "Esta página se ha dejado en blanco intencionalmente"
-        ]
-        
-        return any(line_stripped == legal_end for legal_end in legal_ends)
-    
-    def _is_legal_text(self, text: str) -> bool:
-        """Check if text contains legal disclaimer content"""
-        text_lower = text.lower()
-        
-        # Long legal disclaimer indicators
-        legal_indicators = [
-            "llámenos al 1-866-564-2262",
-            "llÃ¡menos al 1-866-564-2262",
-            "en caso de errores o preguntas",
-            "prepárese para proporcionarnos",
-            "prepÃ¡rese para proporcionar",
-            "su nombre y número de cuenta"
-        ]
-        
-        # If it contains legal indicators and is long, it's legal text
-        if any(indicator in text_lower for indicator in legal_indicators):
-            if len(text) > 200:  # Legal disclaimers are typically long
-                return True
-        
-        return False
-    
     def _detect_section(self, line: str) -> Optional[str]:
         """Detect which section of the statement we're in"""
         line_lower = line.lower().strip()
         
-        # Deposits section
+        # Standard Chase sections (Spanish/English)
         if any(pattern in line_lower for pattern in [
-            "depósitos y adiciones", "deposits and additions",
-            "depÃ³sitos y adiciones",
-            "depósitos electrónicos", "electronic deposits",
-            "depósitos electrÃ³nicos",
-            "crédito de cámara", "ach credit"
+            "depósitos y adiciones", "deposits and additions"
         ]):
             return "deposits"
         
-        # Withdrawals section (including Spanish variations)
+        # FIX: Enhanced Spanish support with UTF-8 variations
         if any(pattern in line_lower for pattern in [
             "retiros electrónicos", "electronic withdrawals",
-            "retiros electrÃ³nicos",
-            "débito de cámara",
-            "débito de cÁmara", "dÉbito de cÁmara"  # UTF-8 variations
+            "retiros electrÃ³nicos"  # UTF-8 variant
         ]):
             return "withdrawals"
         
-        # Fees section
-        if line_lower == "cargos" or line_lower == "charges" or line_lower == "fees":
+        if line_lower == "cargos" or line_lower == "charges":
             return "fees"
-        
-        # Transaction details section
-        if "detalle de transacciones" in line_lower or "transaction detail" in line_lower:
-            return "transactions"
         
         # ATM and Debit Card sections (these are withdrawals)
         if any(pattern in line_lower for pattern in [
@@ -183,21 +100,21 @@ class ChaseParser(BaseBankParser):
         """Check if line is a section header"""
         return self._detect_section(line) is not None
     
-    def _is_noise_line(self, line: str) -> bool:
-        """Enhanced noise filtering with Spanish support"""
+    def _is_basic_noise(self, line: str) -> bool:
+        """Basic noise filtering - only obvious non-transactions"""
         line_lower = line.lower().strip()
         
         # PDF markup
         if "*start*" in line_lower or "*end*" in line_lower:
             return True
         
-        # Enhanced noise patterns with Spanish support
+        # Obvious headers
         basic_noise = [
             "jpmorgan chase bank",
-            "página", "page", "pÃ¡gina",
-            "número de cuenta", "account number", "nÃºmero de cuenta",
-            "total de depósitos", "total deposits", "total de depÃ³sitos",
-            "total de retiros", "total withdrawals",
+            "página", "page",
+            "número de cuenta", "account number",
+            "total de depósitos", "total deposits",
+            "total de retiros", "total withdrawals", 
             "total comisiones", "total fees",
             "saldo inicial", "beginning balance",
             "saldo final", "ending balance",
@@ -205,31 +122,7 @@ class ChaseParser(BaseBankParser):
             "customer service information",
             "checking summary",
             "how to avoid the monthly service fee",
-            "daily ending balance", "saldo final diario",
-            "resumen de cuenta",
-            "detalle de transacciones",
-            "fecha descripción cantidad saldo",  # Table header
-            "fecha descripciÃ³n cantidad saldo",
-            "información para atención al cliente",
-            "informaciÃ³n para atenciÃ³n al cliente",
-            "sitio web:",
-            "centro de atención al cliente:",
-            "centro de atenciÃ³n al cliente:",
-            "para español:",
-            "para espaÃ±ol:",
-            "llamadas internacionales:",
-            "chase total checking",
-            "chase savings",
-            "no se cobró un cargo mensual",
-            "no se cobrÃ³ un cargo mensual",
-            "no se aplicó un cargo mensual",
-            "no se aplicÃ³ un cargo mensual",
-            "tenga depósitos electrónicos",
-            "tenga depÃ³sitos electrÃ³nicos",
-            "mantenga un saldo",
-            "rendimiento porcentual anual",
-            "esta página se ha dejado en blanco",
-            "esta pÃ¡gina se ha dejado en blanco"
+            "daily ending balance"
         ]
         
         for pattern in basic_noise:
@@ -237,31 +130,19 @@ class ChaseParser(BaseBankParser):
                 return True
         
         # Just amounts (balances)
-        if re.match(r"^\s*\$[\d,]+\.?\d{0,2}\s*$", line):
+        if re.match(r"^\s*\$[\d,]+\.\d{2}\s*$", line):
             return True
             
         # Account numbers only
         if re.match(r"^\s*\d{12,}\s*$", line):
             return True
         
-        # Daily balance entries
-        if self._is_daily_balance_entry(line):
+        # Very specific legal disclaimer start
+        if line_lower.startswith("en caso de errores o preguntas sobre sus transferencias electrónicas"):
+            return True
+        if line_lower.startswith("in case of errors or questions about your electronic funds transfers"):
             return True
         
-        return False
-    
-    def _is_daily_balance_entry(self, line: str) -> bool:
-        """Enhanced daily balance detection"""
-        line_lower = line.lower().strip()
-        
-        # English format: "November 30, 2024 through December 31, 2024"
-        if re.search(r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2},\s+\d{4}\s+through\s+", line_lower):
-            return True
-        
-        # Spanish format: "Octubre 17, 2024 a Noviembre 18, 2024"
-        if re.search(r"\b(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\s+\d{1,2},\s+\d{4}\s+a\s+", line_lower):
-            return True
-            
         return False
     
     def _extract_date(self, line: str, year: int) -> Optional[str]:
@@ -270,11 +151,11 @@ class ChaseParser(BaseBankParser):
         # Skip lines that contain obvious legal text markers
         line_lower = line.lower()
         legal_markers = [
-            "llámenos al", "llÃ¡menos al",
+            "llámenos al",
             "call us at", 
             "en caso de errores",
             "in case of errors",
-            "prepárese para proporcionar", "prepÃ¡rese para proporcionar",
+            "prepárese para proporcionar",
             "prepare to provide"
         ]
         
@@ -300,14 +181,14 @@ class ChaseParser(BaseBankParser):
         full_text = " ".join(block)
         
         # Skip if this looks like legal content
-        if self._is_legal_text(full_text):
+        if self._contains_legal_content(full_text):
             return None
         
         # Skip if this is a daily balance entry
         if self._is_daily_balance_entry(full_text):
             return None
         
-        # Extract amount using improved method
+        # Extract amount
         amount = self._extract_amount_from_block_improved(block, full_text)
         if amount is None:
             return None
@@ -326,6 +207,43 @@ class ChaseParser(BaseBankParser):
             "amount": amount,
             "direction": direction
         }
+    
+    def _is_daily_balance_entry(self, text: str) -> bool:
+        """Check if text is a daily balance entry line (not a real transaction)"""
+        text_lower = text.lower()
+        
+        # English format: "November 30, 2024 through December 31, 2024"
+        if re.search(r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2},\s+\d{4}\s+through\s+", text_lower):
+            # Check if it has transaction-like indicators
+            transaction_indicators = ["payment", "deposit", "transfer", "purchase", "withdrawal", "fee"]
+            if not any(indicator in text_lower for indicator in transaction_indicators):
+                return True
+        
+        return False
+    
+    def _contains_legal_content(self, text: str) -> bool:
+        """Check if the text block contains legal disclaimer content"""
+        text_lower = text.lower()
+        
+        # Legal content indicators
+        legal_indicators = [
+            "llámenos al 1-866-564-2262",
+            "call us at 1-866-564-2262",
+            "en caso de errores o preguntas sobre sus transferencias",
+            "in case of errors or questions about your electronic funds transfers",
+            "prepárese para proporcionarnos la siguiente información",
+            "be prepared to give us the following information"
+        ]
+        
+        # If it contains any legal indicators, it's legal content
+        if any(indicator in text_lower for indicator in legal_indicators):
+            return True
+        
+        # If it's extremely long and contains phone numbers, likely legal
+        if len(text) > 500 and re.search(r"1-\d{3}-\d{3}-\d{4}", text):
+            return True
+        
+        return False
     
     def _extract_amount_from_block_improved(self, block: List[str], full_text: str) -> Optional[float]:
         """Extract transaction amount with improved logic to avoid phone numbers"""
@@ -348,9 +266,9 @@ class ChaseParser(BaseBankParser):
             # Fallback to original logic if no valid amounts found
             valid_amounts = all_amounts
         
-        # For Chase statements, the transaction amount is typically first valid amount
-        # (excluding the final balance which is usually last)
-        amount_str = valid_amounts[0] if len(valid_amounts) == 1 else valid_amounts[0]
+        # For Chase statements, the transaction amount is typically the last/rightmost amount
+        # This helps avoid phone numbers which usually appear earlier in the line
+        amount_str = valid_amounts[-1] if valid_amounts else all_amounts[0]
         
         # Check if negative
         is_negative = (amount_str.startswith("-") or 
@@ -367,16 +285,19 @@ class ChaseParser(BaseBankParser):
     
     def _is_likely_transaction_amount(self, amount_str: str, full_text: str) -> bool:
         """Check if an amount string is likely a transaction amount vs phone number/card number"""
+        # Remove formatting to get just the number
         clean_amount = amount_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
         
         try:
+            # Convert to number to check patterns
             num_value = float(clean_amount)
             
-            # Very small amounts (under $1) are unlikely to be transaction amounts
+            # Very small amounts (under $1) are unlikely to be transaction amounts in business accounts
             if num_value < 1:
                 return False
             
-            # Check if this appears to be part of a phone number pattern
+            # Check if this appears to be part of a phone number pattern in the text
+            # Phone numbers often have format like "866-834-2080" or "866.800.4656"
             if self._appears_in_phone_number(amount_str, full_text):
                 return False
             
@@ -395,9 +316,9 @@ class ChaseParser(BaseBankParser):
         
         # Look for phone number patterns around this amount
         phone_patterns = [
-            rf"\b{re.escape(clean_amount)}[-.\s]\d{{3,4}}[-.\s]\d{{4}}\b",
-            rf"\b\d{{3}}[-.\s]{re.escape(clean_amount)}[-.\s]\d{{4}}\b",
-            rf"\b{re.escape(clean_amount)}\.\d{{4}}\b",
+            rf"\b{re.escape(clean_amount)}[-.\s]\d{{3,4}}[-.\s]\d{{4}}\b",  # 866-834-2080
+            rf"\b\d{{3}}[-.\s]{re.escape(clean_amount)}[-.\s]\d{{4}}\b",   # Part of phone
+            rf"\b{re.escape(clean_amount)}\.\d{{4}}\b",                     # 866.800.4656
         ]
         
         for pattern in phone_patterns:
@@ -410,24 +331,54 @@ class ChaseParser(BaseBankParser):
         """Check if amount appears to be a card number"""
         clean_amount = amount_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
         
-        # Look for "Card XXXX" pattern
+        # Look for "Card XXXX" pattern which is common in Chase statements
         if re.search(rf"\bCard\s+{re.escape(clean_amount)}\b", full_text, re.I):
             return True
         
         return False
     
+    def _extract_amount_from_block(self, block: List[str]) -> Optional[float]:
+        """Extract transaction amount from the block of lines (legacy method)"""
+        all_amounts = []
+        
+        for line in block:
+            amounts = RE_AMOUNT.findall(line)
+            all_amounts.extend(amounts)
+        
+        if not all_amounts:
+            return None
+        
+        # Take the first amount found
+        amount_str = all_amounts[0]
+        
+        # Check if negative
+        is_negative = (amount_str.startswith("-") or 
+                      amount_str.startswith("(") or 
+                      amount_str.endswith("-"))
+        
+        # Clean and convert
+        clean = amount_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
+        try:
+            value = float(clean)
+            return -value if is_negative else value
+        except:
+            return None
+    
     def _clean_description(self, text: str) -> str:
-        """Enhanced description cleaning"""
+        """Clean description"""
         # Remove amounts
         cleaned = re.sub(RE_AMOUNT.pattern, "", text)
         
         # Remove dates
         cleaned = re.sub(r"\d{1,2}/\d{1,2}(?:/\d{2,4})?\s*", "", cleaned)
         
-        # Remove specific Chase noise
+        # Remove specific Chase noise that gets mixed with descriptions
         cleaned = re.sub(r"\s*DAILY ENDING BALANCE\s*$", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\s*fecha\s+cantidad\s*", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\s*date\s+amount\s*", "", cleaned, flags=re.I)
+        
+        # Remove PDF pagination noise
+        cleaned = re.sub(r"\s*\d+\s+\d+\s+November\s+\d+,\s+\d+\s+through\s+\w+\s+\d+,\s+\d+\s*\(continued\)\s*$", "", cleaned, flags=re.I)
         
         # Keep Chase transaction codes but clean up format
         cleaned = re.sub(r"\s*trn:\s*", " Trn: ", cleaned, flags=re.I)
@@ -443,7 +394,7 @@ class ChaseParser(BaseBankParser):
         return cleaned
     
     def _determine_direction(self, description: str, section_context: str, amount: float, full_text: str) -> Optional[str]:
-        """Enhanced direction determination with Spanish and Wise support"""
+        """Determine transaction direction with improved logic for ACH and card transactions"""
         desc_lower = description.lower()
         
         # PRIORITY 1: Specific transaction type patterns (override section context)
@@ -457,7 +408,7 @@ class ChaseParser(BaseBankParser):
             return "out"
         
         # Deposits are always IN
-        if "deposit" in desc_lower or "depósito" in desc_lower or "depÃ³sito" in desc_lower:
+        if "deposit" in desc_lower or "depósito" in desc_lower:
             return "in"
         
         # Payments and transfers OUT
@@ -467,13 +418,13 @@ class ChaseParser(BaseBankParser):
         ]):
             return "out"
         
-        # ENHANCED: Wise-specific patterns (always OUT for debits)
+        # FIX: Wise-specific patterns (always OUT for debits)
         if any(pattern in desc_lower for pattern in [
             "wise us inc", "wise", "trnwise"
         ]):
             return "out"
         
-        # ENHANCED: Spanish ACH debit patterns (always OUT)
+        # FIX: Spanish ACH debit patterns (always OUT)
         if any(pattern in desc_lower for pattern in [
             "débito de cámara de compensación automatizada",
             "dÉbito de cÁmara de compensaciÓn automatizada",  # UTF-8 variant
@@ -482,11 +433,15 @@ class ChaseParser(BaseBankParser):
             return "out"
         
         # PRIORITY 2: Handle ACH transactions based on section context
+        # "orig co name" can be either incoming (credit) or outgoing (debit) depending on section
         if "orig co name" in desc_lower:
             if section_context == "deposits":
+                # ACH Credit - incoming transfer (someone sending money to us)
                 return "in"
             elif section_context in ["withdrawals", "electronic withdrawals"]:
+                # ACH Debit - outgoing transfer (money being taken from us)
                 return "out"
+            # If no section context, analyze the description
             elif any(indicator in desc_lower for indicator in ["descr:sender", "descr:credit", "credit"]):
                 return "in"
             else:
@@ -494,13 +449,13 @@ class ChaseParser(BaseBankParser):
         
         # Other direct debits and electronic payments OUT
         if any(pattern in desc_lower for pattern in [
-            "direct debit", "débito directo", "dÃ©bito directo", "elec pymt", "ach debit"
+            "direct debit", "débito directo", "elec pymt", "ach debit"
         ]):
             return "out"
         
         # Fees and charges OUT
         if any(pattern in desc_lower for pattern in [
-            "fee", "charge", "cargo", "counter check", "comisión", "comisiÃ³n"
+            "fee", "charge", "cargo", "counter check", "comisión"
         ]):
             return "out"
         
