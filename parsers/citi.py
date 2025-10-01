@@ -81,35 +81,64 @@ class CitiParser(BaseBankParser):
             return "savings"
         if "citi® savings" in l and "account activity" in l:
             return "savings"
+        if "citibank® savings" in l and "account activity" in l:
+            return "savings"
         if "account activity" in l and "amount subtracted" in l and "amount added" in l:
             return "savings"
         return None
 
     def _is_noise(self, line: str) -> bool:
         l = line.lower().strip()
-        noise_prefixes = [
-            "citibank", "citibusiness", "relationship summary", "checking summary",
-            "customer service information", "page ", "página", "account ", "statement period",
-            "service charge summary", "important notice", "important disclosures",
-            "fdic insurance", "apy and interest rate", "billing rights summary",
-            "in case of errors", "messages from citi", "value of accounts this period",
-            "earnings summary this year", "we are notifying", "effective",
+        
+        # Specific patterns that indicate headers/metadata (not transactions)
+        noise_patterns = [
+            r"^citibank",
+            r"^citibusiness",
+            r"relationship summary",
+            r"checking summary",
+            r"customer service information",
+            r"^page \d+",
+            r"^account \d+",
+            r"^statement period",
+            r"service charge summary from",
+            r"^important notice",
+            r"^important disclosures",
+            r"^fdic insurance",
+            r"^apy and interest rate",
+            r"billing rights summary",
+            r"in case of errors",
+            r"^messages from citi",
+            r"value of accounts this period",
+            r"earnings summary",
+            r"we are notifying",
+            r"^effective",
+            r"^account as of",
+            r"citibusiness® account as of",
+            r"^\w+ \d+,? - \w+ \d+,? \d{4}",  # Statement period dates
+            r"^\d{4} de citi",  # Spanish date patterns
         ]
-        for p in noise_prefixes:
-            if l.startswith(p):
+        
+        for pattern in noise_patterns:
+            if re.search(pattern, l):
                 return True
 
+        # Column headers
         if any(h in l for h in [
             "date description debits credits balance",
             "date description amount subtracted amount added balance",
-            "beginning balance:", "ending balance:", "balance subject", "average daily collected balance",
-            "type of charge", "charges debited from account", "total charges for services", "net service charge",
+            "beginning balance:", "ending balance:", "balance subject", 
+            "average daily collected balance",
+            "type of charge", "charges debited from account", 
+            "total charges for services", "net service charge",
             "total debits/credits", "total subtracted/added",
         ]):
             return True
 
+        # Standalone amounts (not part of transaction description)
         if re.match(r"^\s*\$[\d,]+\.\d{2}\s*$", line):
             return True
+        
+        # Account numbers
         if re.match(r"^\s*\d{12,}\s*$", line):
             return True
 
@@ -143,6 +172,10 @@ class CitiParser(BaseBankParser):
         if self._contains_legal(full) or self._is_balance_block(full):
             return None
 
+        # Check if this is metadata/header that slipped through
+        if self._is_metadata(full):
+            return None
+
         # special handling for Savings Activity
         if section_context == "savings":
             return self._process_savings_block(block, date, year)
@@ -165,6 +198,36 @@ class CitiParser(BaseBankParser):
             "amount": abs(amount),
             "direction": direction,
         }
+
+    def _is_metadata(self, text: str) -> bool:
+        """Check if text is metadata/header rather than a transaction"""
+        t = text.lower()
+        
+        # Check for patterns that indicate this is not a transaction
+        metadata_indicators = [
+            "account as of",
+            "statement period",
+            "service charge summary",
+            "average daily collected balance",
+            "relationship summary",
+            "checking summary",
+        ]
+        
+        for indicator in metadata_indicators:
+            if indicator in t:
+                return True
+        
+        # If it contains account name/company name at the beginning without transaction keywords
+        if re.match(r"^\d{1,2}/\d{1,2}\s+[A-Z\s]+(?:LLC|INC|CORP|COMPANY)", text):
+            # But has no transaction keywords
+            transaction_keywords = [
+                "deposit", "credit", "debit", "wire", "transfer", "payment",
+                "purchase", "withdrawal", "fee", "charge", "interest"
+            ]
+            if not any(kw in t for kw in transaction_keywords):
+                return True
+        
+        return False
 
     def _process_savings_block(self, block: List[str], date: str, year: int) -> Optional[Dict[str, Any]]:
         """
@@ -293,7 +356,10 @@ class CitiParser(BaseBankParser):
         Extract the transaction amount (not balance) from checking account transactions.
         Format: Date Description Debits Credits Balance
         
-        Similar to wf.py's _first_amount_and_cut approach.
+        Strategy:
+        1. Find all amounts
+        2. Identify which is the balance (usually last and largest)
+        3. Take the transaction amount (first or second, not last)
         """
         matches = list(RE_AMOUNT.finditer(text))
         if not matches:
@@ -312,45 +378,58 @@ class CitiParser(BaseBankParser):
             except:
                 return None
 
-        # Parse all amounts
+        # Parse all amounts with their positions
         amounts = []
         for match in matches:
             val = clean_to_float(match.group())
             if val is not None:
-                amounts.append((val, match.start()))
+                amounts.append((val, match.start(), match.end()))
 
         if not amounts:
             return None
 
-        # For checking accounts: Date Description Debits Credits Balance
-        # Typically we have 1-2 transaction amounts + 1 balance = 2-3 amounts total
-        # The last amount is the balance, which we should ignore
+        # Strategy for identifying transaction amount vs balance:
+        # 1. If only 1 amount: it's likely the transaction amount (not balance)
+        # 2. If 2 amounts: first is transaction, last is balance
+        # 3. If 3+ amounts: take the first non-trivial amount, last is balance
         
-        # Strategy: take the first or second amount (not the last which is balance)
-        if len(amounts) >= 2:
-            # We have at least debits/credits + balance
-            # The transaction amount is NOT the last one
-            transaction_amounts = amounts[:-1]
-            
-            # Choose the largest transaction amount (could be debit or credit)
-            amount = max(transaction_amounts, key=lambda x: abs(x[0]))[0]
-            
-            # Cut description before the next amount after our selected amount
-            # Find where our amount is in the list
-            for i, (val, pos) in enumerate(amounts):
-                if val == amount:
-                    if i + 1 < len(amounts):
-                        cut_at = amounts[i + 1][1]
-                        desc = text[:cut_at].rstrip()
-                    else:
-                        desc = text
-                    break
-            else:
-                desc = text
-        else:
-            # Only one amount found - use it
+        if len(amounts) == 1:
+            # Single amount - this is the transaction amount
             amount = amounts[0][0]
             desc = text
+        elif len(amounts) == 2:
+            # Two amounts: first is transaction, second is balance
+            amount = amounts[0][0]
+            # Cut description before the second amount (balance)
+            cut_at = amounts[1][1]
+            desc = text[:cut_at].rstrip()
+        else:
+            # 3+ amounts: identify the transaction amount
+            # The balance is typically the largest value and appears last
+            # Look for the first significant amount that's not tiny
+            transaction_amount = None
+            cut_position = None
+            
+            for i in range(len(amounts) - 1):  # Exclude last (balance)
+                val = amounts[i][0]
+                if abs(val) >= 0.01:  # Non-trivial amount
+                    transaction_amount = val
+                    # Cut before the next amount
+                    if i + 1 < len(amounts):
+                        cut_position = amounts[i + 1][1]
+                    break
+            
+            if transaction_amount is None:
+                # Fallback: take first amount
+                transaction_amount = amounts[0][0]
+                if len(amounts) > 1:
+                    cut_position = amounts[1][1]
+            
+            amount = transaction_amount
+            if cut_position:
+                desc = text[:cut_position].rstrip()
+            else:
+                desc = text
 
         # Clean description
         desc = self._clean_description(desc)
@@ -403,32 +482,36 @@ class CitiParser(BaseBankParser):
     ) -> str:
         d = description.lower()
         
+        # CRITICAL: "DEBIT CARD CREDIT" means a credit/refund on a debit card = incoming
+        if "debit card credit" in d or "debit card credi" in d:
+            return "in"
+        
         # Incoming transactions
         if any(k in d for k in [
             "electronic credit", "deposit", "interest paid", "interest credit", 
-            "wire from", "funds transfer" + "from", "misc deposit"
+            "wire from", "funds transfer from", "misc deposit", "reversal"
         ]):
             return "in"
         
-        if "reversal" in d:
-            return "in"
-        
-        # Outgoing transactions
+        # Outgoing transactions - fees and charges
         if any(k in d for k in [
             "service charge", "fee for", "incoming wire fee", "monthly maintenance fee",
-            "foreign transaction fee", "acct analysis direct db"
+            "foreign transaction fee", "acct analysis direct db", "federal withholding tax"
         ]):
             return "out"
         
+        # Outgoing transactions - debits, wires, withdrawals
         if any(k in d for k in [
-            "debit card purch", "debit card credi", "ach debit", "funds trn out", 
-            "int'l wire out", "international wire out", "cbusol transfer debit", 
-            "cbusol international wire out", "withdrawal", "instant payment debit",
-            "other/withdrawal"
+            "debit card purch",  # Note: PURCH not CREDIT
+            "ach debit", "funds trn out", 
+            "int'l wire out", "international wire out", 
+            "cbusol transfer debit", "cbusol international wire out",
+            "cbol wire to", "cbusol wire to",
+            "withdrawal", "instant payment debit", "other/withdrawal"
         ]):
             return "out"
         
-        if "wire to" in d or "cbusol wire to" in d or "cbol wire to" in d:
+        if "wire to" in d:
             return "out"
         
         # Default: use amount sign
