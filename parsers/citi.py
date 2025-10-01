@@ -75,6 +75,8 @@ class CitiParser(BaseBankParser):
         l = line.lower().strip()
         if "checking activity" in l or "checking account activity" in l or "citibusiness checking activity" in l:
             return "checking"
+        if "streamlined checking" in l:
+            return "checking"
         if "savings activity" in l:
             return "savings"
         if "citi® savings" in l and "account activity" in l:
@@ -91,7 +93,7 @@ class CitiParser(BaseBankParser):
             "service charge summary", "important notice", "important disclosures",
             "fdic insurance", "apy and interest rate", "billing rights summary",
             "in case of errors", "messages from citi", "value of accounts this period",
-            "earnings summary this year",
+            "earnings summary this year", "we are notifying", "effective",
         ]
         for p in noise_prefixes:
             if l.startswith(p):
@@ -100,8 +102,9 @@ class CitiParser(BaseBankParser):
         if any(h in l for h in [
             "date description debits credits balance",
             "date description amount subtracted amount added balance",
-            "beginning balance", "ending balance", "balance subject", "average daily collected balance",
+            "beginning balance:", "ending balance:", "balance subject", "average daily collected balance",
             "type of charge", "charges debited from account", "total charges for services", "net service charge",
+            "total debits/credits", "total subtracted/added",
         ]):
             return True
 
@@ -144,11 +147,14 @@ class CitiParser(BaseBankParser):
         if section_context == "savings":
             return self._process_savings_block(block, date, year)
 
-        amount = self._extract_amount(block, full)
-        if amount is None:
+        # For checking accounts, extract amount properly
+        parsed = self._extract_transaction_amount_and_desc(full)
+        if parsed is None:
             return None
+        
+        amount = parsed["amount"]
+        desc = parsed["desc"]
 
-        desc = self._clean_description(full)
         if not desc or len(desc) < 3:
             return None
 
@@ -156,66 +162,203 @@ class CitiParser(BaseBankParser):
         return {
             "date": date,
             "description": desc,
-            "amount": amount,
+            "amount": abs(amount),
             "direction": direction,
         }
 
     def _process_savings_block(self, block: List[str], date: str, year: int) -> Optional[Dict[str, Any]]:
         """
         Savings accounts print columns: Date | Description | Amount Subtracted | Amount Added | Balance
-        After PDF extraction, 'Amount Subtracted' and 'Amount Added' may appear on same or next line.
+        We need to extract the correct amounts before the balance.
         """
         text = " ".join(block)
-        # extract both amounts
-        tokens = RE_AMOUNT.findall(text)
-        if not tokens:
+        
+        # Extract amounts in order
+        parsed = self._extract_savings_amounts(text)
+        if not parsed:
             return None
 
-        # try to isolate two amounts before balance
-        floats = []
-        for t in tokens:
-            clean = t.replace("$", "").replace(",", "").replace("(", "").replace(")", "")
+        desc = parsed["desc"]
+        amount = parsed["amount"]
+        direction = parsed["direction"]
+
+        if not desc or len(desc) < 3:
+            return None
+
+        return {
+            "date": date,
+            "description": desc,
+            "amount": amount,
+            "direction": direction,
+        }
+
+    def _extract_savings_amounts(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        Extract amounts from savings transaction: Amount Subtracted, Amount Added, Balance
+        Returns the transaction amount (not balance) and direction.
+        """
+        matches = list(RE_AMOUNT.finditer(text))
+        if not matches:
+            return None
+
+        def clean_to_float(amt_str: str) -> Optional[float]:
+            neg = False
+            if amt_str.strip().startswith("(") and amt_str.strip().endswith(")"):
+                neg = True
+            if amt_str.strip().startswith("-"):
+                neg = True
+            clean = amt_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").strip()
             try:
-                val = float(clean)
-                floats.append(val)
+                v = float(clean)
+                return -v if neg else v
             except:
-                continue
+                return None
 
-        if not floats:
+        # Parse all amounts
+        amounts = []
+        for match in matches:
+            val = clean_to_float(match.group())
+            if val is not None:
+                amounts.append((val, match.start()))
+
+        if not amounts:
             return None
 
-        # heuristic: the last value is usually balance, so ignore it
-        if len(floats) >= 2:
-            possible = floats[:-1]
+        # For savings: typically we have 1-3 amounts:
+        # - Only Amount Added (or Amount Subtracted) + Balance = 2 amounts
+        # - Amount Subtracted + Amount Added + Balance = 3 amounts
+        
+        # The last amount is usually the balance, so ignore it
+        if len(amounts) >= 2:
+            transaction_amounts = amounts[:-1]
         else:
-            possible = floats
+            transaction_amounts = amounts
 
-        if not possible:
+        # Determine which is the transaction amount
+        # Look for keywords to determine direction
+        text_lower = text.lower()
+        
+        # Find the transaction amount based on context
+        amount = None
+        direction = None
+        
+        if len(transaction_amounts) >= 2:
+            # We have both subtracted and added amounts
+            sub_amt, add_amt = transaction_amounts[0][0], transaction_amounts[1][0]
+            
+            # Determine which one is the actual transaction
+            if abs(sub_amt) > 0.01 and abs(add_amt) < 0.01:
+                amount = abs(sub_amt)
+                direction = "out"
+            elif abs(add_amt) > 0.01 and abs(sub_amt) < 0.01:
+                amount = abs(add_amt)
+                direction = "in"
+            elif abs(add_amt) > abs(sub_amt):
+                amount = abs(add_amt)
+                direction = "in"
+            else:
+                amount = abs(sub_amt)
+                direction = "out"
+        elif len(transaction_amounts) == 1:
+            # Only one transaction amount
+            amount = abs(transaction_amounts[0][0])
+            
+            # Determine direction from keywords
+            if any(k in text_lower for k in ["interest", "deposit", "credit", "reversal"]):
+                direction = "in"
+            elif any(k in text_lower for k in ["fee", "withdrawal", "debit", "withholding"]):
+                direction = "out"
+            else:
+                direction = "in" if transaction_amounts[0][0] > 0 else "out"
+        else:
             return None
 
-        # choose added vs subtracted: smallest non-zero is fee/out, positive is in
-        sub_val, add_val = None, None
-        if len(possible) == 2:
-            sub_val, add_val = possible
-        elif len(possible) == 1:
-            add_val = possible[0]
+        # Extract description (remove amounts)
+        desc = text
+        for match in matches:
+            desc = desc.replace(match.group(), " ")
+        desc = re.sub(r"\s+", " ", desc).strip()
+        
+        # Clean up description
+        desc = self._clean_description(desc)
 
-        desc = self._clean_description(text)
-        if add_val and add_val > 0:
-            return {
-                "date": date,
-                "description": desc,
-                "amount": add_val,
-                "direction": "in",
-            }
-        if sub_val and sub_val > 0:
-            return {
-                "date": date,
-                "description": desc,
-                "amount": sub_val,
-                "direction": "out",
-            }
-        return None
+        return {
+            "amount": amount,
+            "direction": direction,
+            "desc": desc
+        }
+
+    def _extract_transaction_amount_and_desc(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        Extract the transaction amount (not balance) from checking account transactions.
+        Format: Date Description Debits Credits Balance
+        
+        Similar to wf.py's _first_amount_and_cut approach.
+        """
+        matches = list(RE_AMOUNT.finditer(text))
+        if not matches:
+            return None
+
+        def clean_to_float(amt_str: str) -> Optional[float]:
+            neg = False
+            if amt_str.strip().startswith("(") and amt_str.strip().endswith(")"):
+                neg = True
+            if amt_str.strip().startswith("-"):
+                neg = True
+            clean = amt_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").strip()
+            try:
+                v = float(clean)
+                return -v if neg else v
+            except:
+                return None
+
+        # Parse all amounts
+        amounts = []
+        for match in matches:
+            val = clean_to_float(match.group())
+            if val is not None:
+                amounts.append((val, match.start()))
+
+        if not amounts:
+            return None
+
+        # For checking accounts: Date Description Debits Credits Balance
+        # Typically we have 1-2 transaction amounts + 1 balance = 2-3 amounts total
+        # The last amount is the balance, which we should ignore
+        
+        # Strategy: take the first or second amount (not the last which is balance)
+        if len(amounts) >= 2:
+            # We have at least debits/credits + balance
+            # The transaction amount is NOT the last one
+            transaction_amounts = amounts[:-1]
+            
+            # Choose the largest transaction amount (could be debit or credit)
+            amount = max(transaction_amounts, key=lambda x: abs(x[0]))[0]
+            
+            # Cut description before the next amount after our selected amount
+            # Find where our amount is in the list
+            for i, (val, pos) in enumerate(amounts):
+                if val == amount:
+                    if i + 1 < len(amounts):
+                        cut_at = amounts[i + 1][1]
+                        desc = text[:cut_at].rstrip()
+                    else:
+                        desc = text
+                    break
+            else:
+                desc = text
+        else:
+            # Only one amount found - use it
+            amount = amounts[0][0]
+            desc = text
+
+        # Clean description
+        desc = self._clean_description(desc)
+
+        return {
+            "amount": amount,
+            "desc": desc
+        }
 
     def _is_balance_block(self, text: str) -> bool:
         t = text.lower()
@@ -236,42 +379,6 @@ class CitiParser(BaseBankParser):
             "fdic insurance", "apy and interest rate", "billing rights summary",
         ]
         return any(s in t for s in indicators)
-
-    # -------------------- Amount extraction --------------------
-
-    def _extract_amount(self, block: List[str], full_text: str) -> Optional[float]:
-        def clean_to_float(amt_str: str) -> Optional[float]:
-            neg = False
-            if amt_str.strip().startswith("(") and amt_str.strip().endswith(")"):
-                neg = True
-            if amt_str.strip().startswith("-"):
-                neg = True
-            clean = amt_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").strip()
-            try:
-                v = float(clean)
-                return -v if neg else v
-            except:
-                return None
-
-        tokens: List[str] = []
-        for line in block:
-            tokens.extend(RE_AMOUNT.findall(line))
-
-        vals: List[float] = []
-        dollar_vals: List[float] = []
-        for tok in tokens:
-            v = clean_to_float(tok)
-            if v is None:
-                continue
-            vals.append(v)
-            if "$" in tok:
-                dollar_vals.append(v)
-
-        if not vals:
-            return None
-        if dollar_vals:
-            return max(dollar_vals)
-        return max(vals)
 
     # -------------------- Description cleanup --------------------
 
@@ -295,23 +402,34 @@ class CitiParser(BaseBankParser):
         full_text: str
     ) -> str:
         d = description.lower()
+        
+        # Incoming transactions
         if any(k in d for k in [
-            "electronic credit", "deposit", "interest paid", "interest credit", "wire from"
+            "electronic credit", "deposit", "interest paid", "interest credit", 
+            "wire from", "funds transfer" + "from", "misc deposit"
         ]):
             return "in"
+        
         if "reversal" in d:
             return "in"
+        
+        # Outgoing transactions
         if any(k in d for k in [
-            "service charge", "fee for", "incoming wire fee", "monthly maintenance fee"
+            "service charge", "fee for", "incoming wire fee", "monthly maintenance fee",
+            "foreign transaction fee", "acct analysis direct db"
         ]):
             return "out"
+        
         if any(k in d for k in [
-            "debit card purch", "ach debit", "funds trn out", "int'l wire out",
-            "international wire out", "cbusol transfer debit", "withdrawal"
+            "debit card purch", "debit card credi", "ach debit", "funds trn out", 
+            "int'l wire out", "international wire out", "cbusol transfer debit", 
+            "cbusol international wire out", "withdrawal", "instant payment debit",
+            "other/withdrawal"
         ]):
             return "out"
-        if "wire to" in d:
+        
+        if "wire to" in d or "cbusol wire to" in d or "cbol wire to" in d:
             return "out"
-        if "wire from" in d:
-            return "in"
+        
+        # Default: use amount sign
         return "in" if amount > 0 else "out"
