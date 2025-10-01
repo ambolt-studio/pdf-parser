@@ -38,6 +38,7 @@ class CitiParser(BaseBankParser):
                 i += 1
                 continue
 
+            # build transaction block
             block = [line]
             j = i + 1
             blanks = 0
@@ -74,11 +75,11 @@ class CitiParser(BaseBankParser):
         l = line.lower().strip()
         if "checking activity" in l or "checking account activity" in l or "citibusiness checking activity" in l:
             return "checking"
-        if "savings" in l and "account activity" in l:
-            return "savings"
-        if "account activity" in l and "savings" in l:
+        if "savings activity" in l:
             return "savings"
         if "citi® savings" in l and "account activity" in l:
+            return "savings"
+        if "account activity" in l and "amount subtracted" in l and "amount added" in l:
             return "savings"
         return None
 
@@ -88,9 +89,8 @@ class CitiParser(BaseBankParser):
             "citibank", "citibusiness", "relationship summary", "checking summary",
             "customer service information", "page ", "página", "account ", "statement period",
             "service charge summary", "important notice", "important disclosures",
-            "amendments to the citibusiness client manual", "fdic insurance",
-            "apy and interest rate", "billing rights summary", "in case of errors",
-            "messages from citi", "citi priority", "value of accounts this period",
+            "fdic insurance", "apy and interest rate", "billing rights summary",
+            "in case of errors", "messages from citi", "value of accounts this period",
             "earnings summary this year",
         ]
         for p in noise_prefixes:
@@ -116,7 +116,6 @@ class CitiParser(BaseBankParser):
 
     def _extract_date(self, line: str, year: int) -> Optional[str]:
         s = line.strip()
-        # Citi: MM/DD seguido de espacio o texto
         m = re.match(r"^(\d{1,2})/(\d{1,2})(?:\s|[A-Za-z])", s)
         if not m:
             return None
@@ -141,6 +140,10 @@ class CitiParser(BaseBankParser):
         if self._contains_legal(full) or self._is_balance_block(full):
             return None
 
+        # special handling for Savings Activity
+        if section_context == "savings":
+            return self._process_savings_block(block, date, year)
+
         amount = self._extract_amount(block, full)
         if amount is None:
             return None
@@ -156,6 +159,63 @@ class CitiParser(BaseBankParser):
             "amount": amount,
             "direction": direction,
         }
+
+    def _process_savings_block(self, block: List[str], date: str, year: int) -> Optional[Dict[str, Any]]:
+        """
+        Savings accounts print columns: Date | Description | Amount Subtracted | Amount Added | Balance
+        After PDF extraction, 'Amount Subtracted' and 'Amount Added' may appear on same or next line.
+        """
+        text = " ".join(block)
+        # extract both amounts
+        tokens = RE_AMOUNT.findall(text)
+        if not tokens:
+            return None
+
+        # try to isolate two amounts before balance
+        floats = []
+        for t in tokens:
+            clean = t.replace("$", "").replace(",", "").replace("(", "").replace(")", "")
+            try:
+                val = float(clean)
+                floats.append(val)
+            except:
+                continue
+
+        if not floats:
+            return None
+
+        # heuristic: the last value is usually balance, so ignore it
+        if len(floats) >= 2:
+            possible = floats[:-1]
+        else:
+            possible = floats
+
+        if not possible:
+            return None
+
+        # choose added vs subtracted: smallest non-zero is fee/out, positive is in
+        sub_val, add_val = None, None
+        if len(possible) == 2:
+            sub_val, add_val = possible
+        elif len(possible) == 1:
+            add_val = possible[0]
+
+        desc = self._clean_description(text)
+        if add_val and add_val > 0:
+            return {
+                "date": date,
+                "description": desc,
+                "amount": add_val,
+                "direction": "in",
+            }
+        if sub_val and sub_val > 0:
+            return {
+                "date": date,
+                "description": desc,
+                "amount": sub_val,
+                "direction": "out",
+            }
+        return None
 
     def _is_balance_block(self, text: str) -> bool:
         t = text.lower()
@@ -193,20 +253,6 @@ class CitiParser(BaseBankParser):
             except:
                 return None
 
-        def in_phone_context(s: str, text: str) -> bool:
-            digits = s.replace(",", "").replace(".", "")
-            return bool(re.search(r"\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b", text)) and digits in text
-
-        def in_zip4_context(s: str, text: str) -> bool:
-            if not re.search(r"\b\d{5}-\d{4}\b", text):
-                return False
-            dig = s.replace(",", "").replace(".", "")
-            return dig in text
-
-        def in_card_suffix(s: str, text: str) -> bool:
-            core = s.replace(",", "").split(".")[0]
-            return bool(re.search(rf"\bCard(\s+Ending\s+in)?\s+{re.escape(core)}\b", text, re.I))
-
         tokens: List[str] = []
         for line in block:
             tokens.extend(RE_AMOUNT.findall(line))
@@ -214,8 +260,6 @@ class CitiParser(BaseBankParser):
         vals: List[float] = []
         dollar_vals: List[float] = []
         for tok in tokens:
-            if in_phone_context(tok, full_text) or in_zip4_context(tok, full_text) or in_card_suffix(tok, full_text):
-                continue
             v = clean_to_float(tok)
             if v is None:
                 continue
@@ -234,8 +278,7 @@ class CitiParser(BaseBankParser):
     def _clean_description(self, text: str) -> str:
         cleaned = re.sub(RE_AMOUNT.pattern, "", text)
         cleaned = re.sub(r"\b\d{1,2}/\d{1,2}\b", "", cleaned)
-        cleaned = re.sub(r"\bDATE\s+DESCRIPTION\s+DEBITS\s+CREDITS\s+BALANCE\b", "", cleaned, flags=re.I)
-        cleaned = re.sub(r"\bDATE\s+DESCRIPTION\s+AMOUNT\s+SUBTRACTED\s+AMOUNT\s+ADDED\s+BALANCE\b", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\bDATE\s+DESCRIPTION\s+.*BALANCE\b", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\bBEGINNING BALANCE\b|\bENDING BALANCE\b", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         if cleaned:
@@ -259,13 +302,12 @@ class CitiParser(BaseBankParser):
         if "reversal" in d:
             return "in"
         if any(k in d for k in [
-            "service charge", "service charges", "fee for", "incoming wire fee", "monthly maintenance fee"
+            "service charge", "fee for", "incoming wire fee", "monthly maintenance fee"
         ]):
             return "out"
         if any(k in d for k in [
             "debit card purch", "ach debit", "funds trn out", "int'l wire out",
-            "intl wire out", "international wire out", "cbusol transfer debit",
-            "withdrawal"
+            "international wire out", "cbusol transfer debit", "withdrawal"
         ]):
             return "out"
         if "wire to" in d:
@@ -273,4 +315,3 @@ class CitiParser(BaseBankParser):
         if "wire from" in d:
             return "in"
         return "in" if amount > 0 else "out"
-
