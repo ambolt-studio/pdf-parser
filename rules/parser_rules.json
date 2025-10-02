@@ -1,0 +1,132 @@
+{
+  "global": [
+    "La dirección se determina primero usando el contexto de la sección del statement (deposits, withdrawals, fees) cuando está disponible.",
+    "Los montos negativos o marcados con paréntesis indican salidas de dinero.",
+    "Los montos positivos indican entradas de dinero.",
+    "Se ignoran líneas que contienen solo metadatos, headers, números de cuenta, o información legal.",
+    "Se filtran líneas de balance diario que no representan transacciones reales.",
+    "Las fechas en formato MM/DD o MM/DD/YY se procesan agregando el año detectado del documento.",
+    "Se agrupan líneas consecutivas que pertenecen a la misma transacción hasta encontrar una nueva fecha.",
+    "Se extrae el primer monto encontrado como el monto de la transacción, ignorando el balance final.",
+    "Las descripciones se limpian removiendo los montos, fechas y texto de columnas.",
+    "Wire transfers con '/Org=' en la descripción indican entradas (el origen del wire).",
+    "Wire transfers con '/Bnf=' en la descripción indican salidas (el beneficiario del wire).",
+    "Keywords como 'WIRE IN', 'ACH CREDIT', 'DEPOSIT' indican transacciones entrantes.",
+    "Keywords como 'WIRE OUT', 'ACH DEBIT', 'FEE', 'CHARGE', 'WITHDRAWAL' indican transacciones salientes.",
+    "Las transacciones de Zelle 'FROM' alguien son entradas, 'TO' alguien son salidas.",
+    "PayPal sin la palabra 'CREDIT' se considera salida, PayPal con 'CREDIT' es entrada.",
+    "Compras con tarjeta de débito (DEBIT CARD PURCHASE, POS DEB, CHECKCARD) son salidas.",
+    "Reversals (reversiones) generalmente representan devoluciones o créditos, por lo tanto son entradas.",
+    "Fees de servicio, maintenance fees, y transaction fees siempre son salidas.",
+    "Interest payments e interest credits son entradas.",
+    "Para cuentas de ahorro, se analizan las columnas 'Amount Subtracted' y 'Amount Added' para determinar la dirección.",
+    "Montos que parecen fragmentos de fechas (valores entre 1-31 en contextos sin keywords de transacción) se ignoran.",
+    "Se utiliza el último monto encontrado como balance y se excluye de las transacciones."
+  ],
+  "bank_specific": {
+    "CITI": [
+      "Detecta secciones como 'Checking Activity', 'Savings Activity' para determinar contexto.",
+      "Ignora bloques que contienen 'Daily Ending Balance' o períodos de fechas sin keywords de transacción.",
+      "Filtra ruido como 'Relationship Summary', 'Service Charge Summary', 'Account as of', columnas de headers.",
+      "Para Savings Activity: extrae 'Amount Subtracted' (salida) y 'Amount Added' (entrada), ignorando el Balance final.",
+      "DEBIT CARD CREDIT es una entrada (reembolso en tarjeta de débito), no una salida.",
+      "Para Checking Activity: el primer monto es la transacción, montos posteriores son balance.",
+      "Identifica múltiples montos en una línea y selecciona el correcto basándose en posición y contexto.",
+      "ELECTRONIC CREDIT, DEPOSIT, INTEREST PAID son entradas.",
+      "SERVICE CHARGE, MONTHLY MAINTENANCE FEE, INCOMING WIRE FEE, FOREIGN TRANSACTION FEE son salidas.",
+      "DEBIT CARD PURCH (purchase), ACH DEBIT, WITHDRAWAL, INSTANT PAYMENT DEBIT son salidas.",
+      "WIRE FROM, FUNDS TRANSFER FROM, MISC DEPOSIT son entradas.",
+      "WIRE TO, FUNDS TRN OUT, INT'L WIRE OUT, CBOL WIRE TO son salidas.",
+      "CBUSOL TRANSFER DEBIT, CBUSOL INTERNATIONAL WIRE OUT son salidas.",
+      "FEDERAL WITHHOLDING TAX, ACCT ANALYSIS DIRECT DB son salidas."
+    ],
+    "CHASE": [
+      "Detecta secciones en español e inglés: 'Depósitos y Adiciones', 'Deposits and Additions' (entradas).",
+      "Detecta 'Retiros Electrónicos', 'Electronic Withdrawals', 'Card Purchases' (salidas).",
+      "Detecta 'Cargos', 'Charges' (salidas/fees).",
+      "Filtra ruido específico de Chase: '*START*', '*END*', 'JPMorgan Chase Bank', 'Duplicate Statement'.",
+      "Ignora líneas de customer service, legal disclaimers (In case of errors, Llámenos al).",
+      "REVERSAL o REVERSIÓN indican entrada (devolución de cargo).",
+      "FEE, CHARGE, CARGO, COMISIÓN, SERVICE CHARGE son salidas.",
+      "DEPOSIT, CREDIT, INCOMING, ACH CREDIT, WIRE CREDIT son entradas.",
+      "CARD PURCHASE, COMPRA CON TARJETA, RECURRING CARD PURCHASE son salidas.",
+      "WISE US INC, TRN WISE son salidas.",
+      "PAYMENT TO, ZELLE PAYMENT TO, ONLINE PAYMENT, WIRE TRANSFER son salidas.",
+      "TRANSFERENCIA A, ONLINE DOMESTIC WIRE TRANSFER, ONLINE INTERNATIONAL WIRE TRANSFER son salidas.",
+      "DÉBITO DE CÁMARA son salidas.",
+      "ZELLE PAYMENT FROM son entradas.",
+      "Extrae montos evitando confundirlos con números de teléfono (patrones XXX-XXX-XXXX).",
+      "Selecciona el monto con símbolo $ cuando hay múltiples montos, o el mayor monto si no hay $."
+    ],
+    "BOFA": [
+      "Detecta secciones: 'Deposits and Other Additions/Credits' (entradas), 'Withdrawals and Other Debits' (salidas).",
+      "Detecta 'ATM and Debit Card Subtractions' (salidas), 'Service Fees' (salidas).",
+      "Usa el contexto de sección como regla principal para determinar dirección.",
+      "WIRE TYPE:WIRE IN, WIRE TYPE:INTL IN son entradas.",
+      "WIRE TYPE:WIRE OUT, WIRE TYPE:INTL OUT, WIRE TYPE:FX OUT son salidas.",
+      "ZELLE PAYMENT FROM son entradas.",
+      "ZELLE PAYMENT TO son salidas.",
+      "TRANSFER FROM (via WISE) son entradas.",
+      "CHECKCARD, PURCHASE, MOBILE PURCHASE son salidas.",
+      "FEE, CHARGE, SVC CHARGE, MONTHLY FEE, INTERNATIONAL TRANSACTION FEE son salidas.",
+      "DEPOSIT, CREDIT, RECEIVED, CASHREWARD son entradas independientemente de la sección.",
+      "PREFERRED REWARDS WAIVER, PRFD RWDS WAIVER son tratados como metadatos (salida neutra).",
+      "TRANSFER con 'CONFIRMATION#' se asume salida por defecto.",
+      "ONLINE BANKING PAYMENT/TRANSFER se asume salida.",
+      "WISE INC sin indicadores claros se trata como entrada, pero con '-' en descripción es salida.",
+      "ONTOP HOLDINGS son entradas.",
+      "Transacciones con 'BNF:' (beneficiario) son salidas.",
+      "ACCTVERIFY con '-' son salidas, sin '-' son entradas.",
+      "Ignora 'Daily Ledger Balances', 'Subtotal for Card', 'Beginning Balance', 'Ending Balance'."
+    ],
+    "WELLS_FARGO": [
+      "Detecta si un monto parece ser parte de una fecha (valor entre 1-31 en contexto de fechas) y lo ignora.",
+      "Filtra líneas de metadata extensas: 'Statement Period Activity', 'Important Account Information', 'Account Options'.",
+      "Ignora 'Units Used', 'Units Included', 'Excess Units', 'Service Charge Description'.",
+      "NO filtra 'Monthly Service Fee' porque es una transacción legítima (salida).",
+      "Wire transfers con '/Org=' (organizador) son entradas, con '/Bnf=' (beneficiario) son salidas.",
+      "ONLINE TRANSFER FROM, TRANSFER FROM, LLC SENDER, SENDER son entradas.",
+      "Patrones 'FROM' en descripción indican entrada (dinero viene DE una entidad).",
+      "Company Payment patterns (ej: 'Lafeber Company Payment') son entradas.",
+      "ZELLE FROM son entradas, ZELLE TO son salidas.",
+      "WT seguido de nombre (ej: WT Morgan Stanley) sin /Org= o /Bnf= son entradas.",
+      "INTEREST PAYMENT, INTEREST CREDIT, DEPOSIT, CREDIT (no credit card) son entradas.",
+      "PURCHASE, PAYMENT AUTHORIZED, RECURRING PAYMENT, ONLINEPAY, PYMT son salidas.",
+      "DUES, AUTO PAY, AUTOPAY, DIRECT DEBIT son salidas.",
+      "FEE, SVC CHARGE, WIRE TRANS SVC CHARGE son salidas.",
+      "ACCT DUES, ST. ANDREWS, SANDOVAL ACCOUNT SALE son salidas.",
+      "Toma el primer monto que no sea fecha como monto de transacción, ignora montos posteriores (balance)."
+    ],
+    "TRUIST": [
+      "Detecta secciones usando regex: 'Deposits.*credits' (entradas), 'Other withdrawals|Debits|Service charges' (salidas).",
+      "Usa el contexto de sección como regla primaria para dirección.",
+      "Keywords de salida: ZELLE, PAYMENT TO, IAT, DEBIT, WITHDRAWAL, ACH, BILL PAY.",
+      "Keywords de entrada: DEPOSIT, CREDIT, INTEREST, PAYPAL seguido de números.",
+      "Si no hay contexto de sección, usa keywords para determinar dirección.",
+      "Usa el signo del monto como último recurso: negativo = salida, positivo = entrada.",
+      "Toma el primer monto encontrado como monto de transacción."
+    ],
+    "MERCURY": [
+      "Las fechas suelen venir en formato 'Feb 01', 'Feb 06' (MMM DD).",
+      "Agrupa líneas hasta encontrar la siguiente fecha.",
+      "Heurística simple: el primer monto encontrado es el de la transacción, montos posteriores son balance.",
+      "No implementa reglas específicas de dirección, usa lógica global o común."
+    ],
+    "PNB": [
+      "Agrupa líneas de descripción multilínea hasta encontrar una nueva fecha.",
+      "El monto puede venir con trailing '-' para indicar débito.",
+      "Toma el primer monto encontrado como monto de transacción.",
+      "No implementa reglas específicas de dirección, usa lógica global o común."
+    ],
+    "VALLEY": [
+      "Agrupa líneas hasta la próxima fecha, limitando bloques muy largos (>250 caracteres).",
+      "Determina dirección por signo del monto: negativo = salida, positivo = entrada.",
+      "Convierte todos los montos a valores absolutos para el resultado final."
+    ],
+    "IFB": [
+      "Agrupa líneas hasta encontrar la siguiente fecha.",
+      "Heurística simple: primer monto = transacción, montos posteriores = balance.",
+      "No implementa reglas específicas de dirección, usa lógica global o común."
+    ]
+  }
+}
