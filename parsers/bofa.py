@@ -12,6 +12,7 @@ from .base import (
 
 class BOFAParser(BaseBankParser):
     key = "bofa"
+    version = "2024.10.03-daily-balance-fix"  # Version identifier for debugging
     
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
         lines = extract_lines(pdf_bytes)
