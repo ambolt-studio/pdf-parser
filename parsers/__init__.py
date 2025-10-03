@@ -8,6 +8,7 @@ from .wf import WFParser
 from .citi import CitiParser
 from .truist import TruistParser
 from .bofa import BOFAParser
+from .bofa_relationship import BOFARelationshipParser
 from .chase import ChaseParser
 
 # Registramos CLASES, no instancias
@@ -21,12 +22,13 @@ REGISTRY = {
     "citi": CitiParser,
     "truist": TruistParser,
     "bofa": BOFAParser,
+    "bofa_relationship": BOFARelationshipParser,
     "chase": ChaseParser,
 }
 
 # Patrones para detectar banco en el texto - ORDEN IMPORTANTE
 DETECTION = [
-    # Chase patterns - add early to avoid conflicts
+    # Chase primero para evitar conflictos
     ("chase", [
         r"\bJPMorgan Chase Bank\b",
         r"\bChase Bank\b",
@@ -36,7 +38,16 @@ DETECTION = [
         r"\bChase Mobile\b",
         r"\bChase Debit Card\b"
     ]),
-    # BOFA primero para evitar conflictos con otros patrones
+
+    # BOFA – layout extendido (Relationship Banking)
+    ("bofa_relationship", [
+        r"\bBusiness Advantage Relationship Banking\b",
+        r"\bPreferred Rewards for Bus\b",
+        r"\bcontinued on the next page\b",
+        r"Your checking account\s+Deposits and other credits",
+    ]),
+
+    # BOFA – layout normal (Fundamentals / estándar)
     ("bofa", [
         r"\bBank of America\b",
         r"bankofamerica\.com",
@@ -44,6 +55,7 @@ DETECTION = [
         r"\bBusiness Advantage\b",
         r"1\.888\.BUSINESS"
     ]),
+
     ("ifb", [
         r"International\s+Finance\s+Bank",
         r"\bIFB Bus Checking\b",
@@ -64,7 +76,7 @@ DETECTION = [
         r"\bP\.O\. Box 012620, Miami\b",
         r"\bACCT ENDING\b"
     ]),
-    # Wells Fargo más específico para evitar conflictos
+    # Wells Fargo más específico
     ("wf", [
         r"\bWells Fargo\b",
         r"wellsfargo\.com",
