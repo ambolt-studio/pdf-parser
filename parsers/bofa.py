@@ -9,7 +9,7 @@ from .base import (
 
 class BOFAParser(BaseBankParser):
     key = "bofa"
-    version = "2024.10.03.v9-multi-fee"
+    version = "2024.10.04.v1-multi-amount"
 
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
         raw_lines = extract_lines(pdf_bytes)
@@ -49,31 +49,38 @@ class BOFAParser(BaseBankParser):
             if not date:
                 continue
 
-            # Monto
+            # Extraer todos los montos de la línea
             amounts = RE_AMOUNT.findall(line)
             if not amounts:
                 continue
 
+            description = self._clean_description(line)
+            if not description or len(description) < 5:
+                continue
+
+            # Revisar cada monto por separado
             for amt_str in amounts:
                 clean = amt_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
                 try:
                     amount = float(clean)
                 except:
                     continue
+
+                # Filtros de valores extremos
                 if amount < 0.01 or amount > 10000000:
                     continue
 
-                description = self._clean_description(line)
-                if not description or len(description) < 5:
+                desc_lower = description.lower()
+
+                # Ignorar waivers o montos en 0
+                if "waiver" in desc_lower or amount == 0:
                     continue
 
-                # Ignorar waivers o fees $0
-                if "waiver" in description.lower() or amount == 0:
-                    continue
-
+                # Evitar headers o balances disfrazados
                 if self._contains_header_phrases(description) or self._looks_like_balance_entry(description):
                     continue
 
+                # Determinar dirección
                 direction = self._determine_direction(description, current_section)
                 if not direction:
                     continue
@@ -85,14 +92,14 @@ class BOFAParser(BaseBankParser):
                     "direction": direction
                 })
 
-        # --- Deduplicado más fino ---
+        # --- Deduplicado controlado ---
         seen = set()
         unique = []
         for tx in results:
             desc_lower = tx["description"].lower()
             trn = self._extract_trn(tx["description"]) or ""
 
-            # 🔧 Nunca deduplicar Wire Transfer Fee
+            # Nunca deduplicar Wire Transfer Fee
             if "wire transfer fee" in desc_lower:
                 unique.append(tx)
                 continue
