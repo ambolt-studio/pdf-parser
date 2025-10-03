@@ -35,7 +35,7 @@ class BOFAParser(BaseBankParser):
             if self._is_noise_line(line):
                 continue
             
-            # Buscar fecha en formato MM/DD/YY
+            # Buscar fecha en formato MM/DD/YY (al inicio de línea)
             date = self._extract_date(line, year)
             if not date:
                 continue
@@ -95,7 +95,7 @@ class BOFAParser(BaseBankParser):
             "ending balance", "average ledger", "your adv plus banking",
             "deposits and other additions", "atm and debit card subtractions",
             "other subtractions", "withdrawals and other subtractions",
-            "business advantage fundamentals"
+            "business advantage fundamentals", "this page intentionally left blank"
         ]
         
         # Solo filtrar si la línea EMPIEZA con estos patrones o los contiene como línea completa
@@ -103,14 +103,24 @@ class BOFAParser(BaseBankParser):
             if line_lower.strip() == pattern or line_lower.startswith(pattern):
                 return True
         
+        # Filtrar líneas que son solo headers de tabla sin transacción
+        # Ejemplo: "Date Description Amount"
+        if re.match(r"^\s*date\s+description\s+amount\s*$", line_lower):
+            return True
+        
         # Filtrar balances diarios: patrón exacto MM/DD balance MM/DD
         if re.match(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s+\d{1,2}/\d{1,2}\s*$", line):
+            return True
+        
+        # Nueva regla: filtrar líneas que son solo metadata sin transacción real
+        # Buscar líneas que tengan "SYLA GLOBAL SOLUTIONS INC" seguido de "Account #" (son headers)
+        if "syla global solutions inc" in line_lower and "account #" in line_lower:
             return True
         
         return False
     
     def _extract_date(self, line: str, year: int) -> str | None:
-        """Extraer fecha del formato MM/DD/YY"""
+        """Extraer fecha del formato MM/DD/YY al inicio de la línea"""
         # Buscar MM/DD/YY al inicio de la línea
         match = re.match(r"(\d{1,2})/(\d{1,2})/(\d{2})", line.strip())
         if match:
@@ -120,29 +130,40 @@ class BOFAParser(BaseBankParser):
         return None
     
     def _extract_amount(self, line: str) -> float | None:
-        """Extraer monto de la línea"""
+        """Extraer monto de la línea - mejorado para wire transfers"""
         amounts = RE_AMOUNT.findall(line)
         if not amounts:
             return None
         
-        # Tomar el primer monto encontrado (suele ser el de la transacción)
-        amount_str = amounts[0]
+        # Para wire transfers, el monto suele estar al final de la línea
+        # Tomar el ÚLTIMO monto encontrado, no el primero
+        amount_str = amounts[-1]
         
         # Limpiar y convertir
         clean = amount_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
         try:
-            return float(clean)
+            amount = float(clean)
+            # Validar que el monto sea razonable (no un número de cuenta o ID)
+            if amount < 0.01 or amount > 10000000:
+                return None
+            return amount
         except:
             return None
     
     def _clean_description(self, line: str) -> str:
-        """Limpiar descripción removiendo montos"""
-        # Remover todos los montos
-        cleaned = re.sub(RE_AMOUNT.pattern, "", line)
+        """Limpiar descripción removiendo fecha y monto al inicio/final"""
+        # Remover fecha del inicio (MM/DD/YY)
+        cleaned = re.sub(r"^\s*\d{1,2}/\d{1,2}/\d{2}\s+", "", line)
         
-        # Remover texto común
+        # Remover todos los montos
+        cleaned = re.sub(RE_AMOUNT.pattern, "", cleaned)
+        
+        # Remover texto común de continuación
         cleaned = re.sub(r"\s*continued\s+on\s+the\s+next\s+page\s*$", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\s*total\s+deposits\s+and\s+other\s+credits\s*$", "", cleaned, flags=re.I)
+        
+        # Remover exceso de espacios
+        cleaned = re.sub(r"\s+", " ", cleaned)
         
         return cleaned.strip()
     
@@ -153,15 +174,17 @@ class BOFAParser(BaseBankParser):
         # PRIORIDAD 1: Usar contexto de sección para la mayoría de casos
         # Solo usar reglas específicas para casos muy claros
         
-        # Regla 1: WIRE IN y INTL IN siempre son entradas
-        if ("wire type:wire in" in desc_lower or 
-            "wire type:intl in" in desc_lower):
+        # Regla 1: WIRE IN, INTL IN y BOOK IN siempre son entradas
+        if (re.search(r"wire type:\s*wire in", desc_lower) or 
+            re.search(r"wire type:\s*intl in", desc_lower) or
+            re.search(r"wire type:\s*book in", desc_lower)):
             return "in"
         
-        # Regla 2: WIRE OUT, INTL OUT y FX OUT siempre son salidas
-        if ("wire type:wire out" in desc_lower or 
-            "wire type:intl out" in desc_lower or
-            "wire type:fx out" in desc_lower):
+        # Regla 2: WIRE OUT, INTL OUT, FX OUT y BOOK OUT siempre son salidas
+        if (re.search(r"wire type:\s*wire out", desc_lower) or 
+            re.search(r"wire type:\s*intl out", desc_lower) or
+            re.search(r"wire type:\s*fx out", desc_lower) or
+            re.search(r"wire type:\s*book out", desc_lower)):
             return "out"
         
         # Regla 3: Zelle payments FROM alguien son entradas
@@ -197,6 +220,22 @@ class BOFAParser(BaseBankParser):
         # Regla 9: Wire rewards waivers son metadatos (salida neutra)
         if ("preferred rewards" in desc_lower or "prfd rwds" in desc_lower) and "waiver" in desc_lower:
             return "out"
+        
+        # Regla 10: Online Banking Transfer - puede ser entrada o salida dependiendo del contexto
+        if "online banking transfer" in desc_lower:
+            # Si tiene "conf#" seguido de descripción, usar contexto de sección
+            if section_context:
+                return "in" if section_context == "deposits" else "out"
+        
+        # Regla 11: CA TLR transfer (teller transfer) - usar contexto de sección
+        if "ca tlr transfer" in desc_lower or "teller transfer" in desc_lower:
+            if section_context:
+                return "in" if section_context == "deposits" else "out"
+        
+        # Regla 12: BKOFAMERICA BC (bank cashier) - usar contexto de sección
+        if "bkofamerica bc" in desc_lower:
+            if section_context:
+                return "in" if section_context == "deposits" else "out"
         
         # PRIORIDAD 2: Usar contexto de sección para todo lo demás
         # Si estamos en una sección específica, confiar en esa clasificación
