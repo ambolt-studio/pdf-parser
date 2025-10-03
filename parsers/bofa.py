@@ -9,7 +9,7 @@ from .base import (
 
 class BOFAParser(BaseBankParser):
     key = "bofa"
-    version = "2025.10.03.v8-fix"
+    version = "2025.10.03.v9-feesfix"
     
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
         raw_lines = extract_lines(pdf_bytes)
@@ -62,7 +62,19 @@ class BOFAParser(BaseBankParser):
             if self._contains_header_phrases(description) or self._looks_like_balance_entry(description):
                 continue
             
-            # Determinar dirección
+            # --- 🔧 Regla especial: Service Fees ---
+            if current_section == "withdrawals" and "wire transfer fee" in description.lower():
+                if amount > 0:
+                    results.append({
+                        "date": date,
+                        "description": "Wire Transfer Fee",
+                        "amount": amount,
+                        "direction": "out"
+                    })
+                # ignorar fee waivers ($0)
+                continue
+            
+            # Dirección normal
             direction = self._determine_direction(description, current_section)
             if not direction:
                 continue
@@ -207,7 +219,7 @@ class BOFAParser(BaseBankParser):
         clean = amount_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
         try:
             amount = float(clean)
-            # 🔧 quitamos el threshold bajo, solo descartamos montos absurdos muy altos
+            # 🔧 solo descartamos montos absurdos muy altos
             if amount > 100000000:
                 return None
             return amount
