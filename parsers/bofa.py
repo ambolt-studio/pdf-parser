@@ -9,7 +9,7 @@ from .base import (
 
 class BOFAParser(BaseBankParser):
     key = "bofa"
-    version = "2024.10.05.v-multi-fees"
+    version = "2024.12.30.v-fix-missing-txs"
     
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
         raw_lines = extract_lines(pdf_bytes)
@@ -25,7 +25,6 @@ class BOFAParser(BaseBankParser):
             if not line.strip():
                 continue
             
-            # Detectar sección de balances diarios
             if self._is_daily_balance_section(line):
                 in_daily_balances = True
                 continue
@@ -44,7 +43,6 @@ class BOFAParser(BaseBankParser):
             if self._is_noise_line(line):
                 continue
 
-            # ⚡️ CASO ESPECIAL: Wire Transfer Fees (puede haber varios en 1 línea)
             if "wire transfer fee" in line.lower():
                 date = self._extract_date(line, year)
                 if not date:
@@ -55,7 +53,7 @@ class BOFAParser(BaseBankParser):
                     clean_amt = amt.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
                     try:
                         val = float(clean_amt)
-                        if val > 0.01:  # ignoramos los $0 (waivers)
+                        if val > 0.01:
                             results.append({
                                 "date": date,
                                 "description": "Wire Transfer Fee",
@@ -66,7 +64,6 @@ class BOFAParser(BaseBankParser):
                         continue
                 continue
             
-            # DEBE tener fecha con año (MM/DD/YY)
             date = self._extract_date(line, year)
             if not date:
                 continue
@@ -76,10 +73,9 @@ class BOFAParser(BaseBankParser):
                 continue
             
             description = self._clean_description(line)
-            if not description or len(description) < 10:
+            if not description or len(description) < 5:
                 continue
             
-            # NO debe contener frases de header NI patrones de balance
             if self._contains_header_phrases(description) or self._looks_like_balance_entry(description):
                 continue
             
@@ -96,7 +92,6 @@ class BOFAParser(BaseBankParser):
         
         return results
     
-    # --- funciones auxiliares sin cambios ---
     def _looks_like_balance_entry(self, text: str) -> bool:
         text_lower = text.lower()
         dates_without_year = re.findall(r'\b\d{1,2}/\d{1,2}\b(?!/\d{2})', text)
@@ -105,7 +100,7 @@ class BOFAParser(BaseBankParser):
         if re.search(r'\b\d{1,2}/\d{1,2}\b(?!/\d{2})', text):
             has_transaction_indicators = any(indicator in text_lower for indicator in [
                 'wire type:', 'online banking', 'zelle', 'transfer', 'payment',
-                'checkcard', 'purchase', 'fee', 'deposit', 'withdrawal'
+                'checkcard', 'purchase', 'fee', 'deposit', 'withdrawal', 'ca tlr', 'bkofamerica'
             ])
             if not has_transaction_indicators:
                 return True
@@ -171,25 +166,49 @@ class BOFAParser(BaseBankParser):
     
     def _is_noise_line(self, line: str) -> bool:
         line_lower = line.lower()
-        noise_patterns = [
-            "bank of america", "your checking account", "account summary",
-            "deposits and other credits", "withdrawals and other debits",
-            "service fees", "daily ledger balances", "preferred rewards",
-            "important information", "customer service", "page ", " of ",
+        
+        exact_noise = [
+            "bank of america",
+            "your checking account", 
+            "account summary",
+            "deposits and other credits",
+            "withdrawals and other debits",
+            "service fees",
+            "daily ledger balances",
+            "preferred rewards",
+            "important information",
+            "customer service",
             "date description amount",
-            "total deposits", "total withdrawals", "total service fees",
-            "continued on", "beginning balance", "ending balance",
-            "average ledger", "business advantage", "this page intentionally"
+            "total deposits",
+            "total withdrawals", 
+            "total service fees",
+            "beginning balance",
+            "ending balance",
+            "average ledger",
+            "business advantage",
+            "this page intentionally"
         ]
-        for pattern in noise_patterns:
-            if line_lower.strip().startswith(pattern):
+        
+        line_stripped = line_lower.strip()
+        for pattern in exact_noise:
+            if line_stripped == pattern or line_stripped.startswith(pattern + " "):
                 return True
+        
+        if re.match(r"^\s*page\s+\d+\s+of\s+\d+\s*$", line_lower):
+            return True
+        
+        if "continued on" in line_lower and "next page" in line_lower:
+            return True
+        
         if re.match(r"^\s*date\s+description\s+amount\s*$", line_lower):
             return True
+        
         if re.match(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s*$", line):
             return True
+        
         if re.match(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s+\d{1,2}/\d{1,2}", line):
             return True
+        
         return False
     
     def _extract_date(self, line: str, year: int) -> str | None:
@@ -223,51 +242,69 @@ class BOFAParser(BaseBankParser):
     
     def _determine_direction(self, description: str, section_context: str = None) -> str | None:
         desc_lower = description.lower()
+        
         if (re.search(r"wire type:\s*wire in", desc_lower) or 
             re.search(r"wire type:\s*intl in", desc_lower) or
             re.search(r"wire type:\s*book in", desc_lower) or
             re.search(r"wire type:\s*fx in", desc_lower)):
             return "in"
+        
         if (re.search(r"wire type:\s*wire out", desc_lower) or 
             re.search(r"wire type:\s*intl out", desc_lower) or
             re.search(r"wire type:\s*fx out", desc_lower) or
             re.search(r"wire type:\s*book out", desc_lower)):
             return "out"
+        
         if "zelle payment from" in desc_lower:
             return "in"
         if "zelle payment to" in desc_lower:
             return "out"
+        
         if "transfer" in desc_lower and "from" in desc_lower and "via wise" in desc_lower:
             return "in"
+        
         if any(keyword in desc_lower for keyword in ["fee", "charge", "svc charge"]):
             return "out"
+        
         if any(keyword in desc_lower for keyword in ["checkcard", "purchase"]):
             return "out"
+        
         if any(keyword in desc_lower for keyword in ["deposit", "credit", "received", "cashreward"]):
             return "in"
+        
         if ("preferred rewards" in desc_lower or "prfd rwds" in desc_lower) and "waiver" in desc_lower:
             return "out"
+        
         if "online banking transfer" in desc_lower or "online transfer" in desc_lower:
             if section_context:
                 return "in" if section_context == "deposits" else "out"
+        
         if "ca tlr transfer" in desc_lower:
             if section_context:
                 return "in" if section_context == "deposits" else "out"
+        
         if "bkofamerica bc" in desc_lower:
             if section_context:
                 return "in" if section_context == "deposits" else "out"
+        
         if section_context == "deposits":
             return "in"
         elif section_context == "withdrawals":
             return "out"
+        
         if "transfer" in desc_lower and "confirmation#" in desc_lower:
             return "out"
+        
         if "online banking" in desc_lower and any(kw in desc_lower for kw in ["payment", "transfer"]):
             return "out"
+        
         if "wise inc" in desc_lower:
             return "out" if "-" in description else "in"
+        
         if "ontop holdings" in desc_lower:
             return "in"
+        
         if "bnf:" in desc_lower:
             return "out"
+        
         return "out"
