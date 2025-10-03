@@ -9,7 +9,7 @@ from .base import (
 
 class BOFAParser(BaseBankParser):
     key = "bofa"
-    version = "2024.10.04.v10-fee-date-fix"
+    version = "2024.10.05.v-multi-fees"
     
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
         raw_lines = extract_lines(pdf_bytes)
@@ -20,12 +20,12 @@ class BOFAParser(BaseBankParser):
         
         current_section = None
         in_daily_balances = False
-        last_date = None   # 🔑 guardamos la última fecha válida
         
-        for line in lines:
+        for i, line in enumerate(lines):
             if not line.strip():
                 continue
             
+            # Detectar sección de balances diarios
             if self._is_daily_balance_section(line):
                 in_daily_balances = True
                 continue
@@ -43,26 +43,43 @@ class BOFAParser(BaseBankParser):
             
             if self._is_noise_line(line):
                 continue
-            
-            # Buscar fecha explícita
-            date = self._extract_date(line, year)
-            if date:
-                last_date = date
-            else:
-                # 🔑 Si no tiene fecha pero es un Wire Transfer Fee, usar la última fecha conocida
-                if "wire transfer fee" in line.lower() and last_date:
-                    date = last_date
-                else:
+
+            # ⚡️ CASO ESPECIAL: Wire Transfer Fees (puede haber varios en 1 línea)
+            if "wire transfer fee" in line.lower():
+                date = self._extract_date(line, year)
+                if not date:
                     continue
+
+                amounts = RE_AMOUNT.findall(line)
+                for amt in amounts:
+                    clean_amt = amt.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
+                    try:
+                        val = float(clean_amt)
+                        if val > 0.01:  # ignoramos los $0 (waivers)
+                            results.append({
+                                "date": date,
+                                "description": "Wire Transfer Fee",
+                                "amount": val,
+                                "direction": "out"
+                            })
+                    except:
+                        continue
+                continue
+            
+            # DEBE tener fecha con año (MM/DD/YY)
+            date = self._extract_date(line, year)
+            if not date:
+                continue
             
             amount = self._extract_amount(line)
             if amount is None or amount == 0:
                 continue
             
             description = self._clean_description(line)
-            if not description or len(description) < 5:
+            if not description or len(description) < 10:
                 continue
             
+            # NO debe contener frases de header NI patrones de balance
             if self._contains_header_phrases(description) or self._looks_like_balance_entry(description):
                 continue
             
@@ -79,17 +96,18 @@ class BOFAParser(BaseBankParser):
         
         return results
     
+    # --- funciones auxiliares sin cambios ---
     def _looks_like_balance_entry(self, text: str) -> bool:
         text_lower = text.lower()
         dates_without_year = re.findall(r'\b\d{1,2}/\d{1,2}\b(?!/\d{2})', text)
         if len(dates_without_year) >= 2:
             return True
         if re.search(r'\b\d{1,2}/\d{1,2}\b(?!/\d{2})', text):
-            has_tx = any(ind in text_lower for ind in [
+            has_transaction_indicators = any(indicator in text_lower for indicator in [
                 'wire type:', 'online banking', 'zelle', 'transfer', 'payment',
                 'checkcard', 'purchase', 'fee', 'deposit', 'withdrawal'
             ])
-            if not has_tx:
+            if not has_transaction_indicators:
                 return True
         return False
     
@@ -102,23 +120,16 @@ class BOFAParser(BaseBankParser):
                 for part in parts:
                     if re.match(r'^\d{1,2}/\d{1,2}/\d{2}\s+$', part):
                         if temp_line.strip():
-                            processed.extend(self._expand_multiple_fees(temp_line.strip()))
+                            processed.append(temp_line.strip())
                         temp_line = part
                     else:
                         temp_line += part
                 if temp_line.strip():
-                    processed.extend(self._expand_multiple_fees(temp_line.strip()))
+                    processed.append(temp_line.strip())
             else:
-                processed.extend(self._expand_multiple_fees(line))
+                processed.append(line)
         return processed
-
-    def _expand_multiple_fees(self, line: str) -> List[str]:
-        fee_pattern = re.compile(r'(Wire Transfer Fee.*?\$?\s*\d+(?:\.\d{2})?)', re.I)
-        matches = fee_pattern.findall(line)
-        if matches and len(matches) > 1:
-            return matches
-        return [line]
-
+    
     def _contains_header_phrases(self, text: str) -> bool:
         text_lower = text.lower()
         bad_phrases = [
@@ -228,11 +239,11 @@ class BOFAParser(BaseBankParser):
             return "out"
         if "transfer" in desc_lower and "from" in desc_lower and "via wise" in desc_lower:
             return "in"
-        if any(k in desc_lower for k in ["fee", "charge", "svc charge"]):
+        if any(keyword in desc_lower for keyword in ["fee", "charge", "svc charge"]):
             return "out"
-        if any(k in desc_lower for k in ["checkcard", "purchase"]):
+        if any(keyword in desc_lower for keyword in ["checkcard", "purchase"]):
             return "out"
-        if any(k in desc_lower for k in ["deposit", "credit", "received", "cashreward"]):
+        if any(keyword in desc_lower for keyword in ["deposit", "credit", "received", "cashreward"]):
             return "in"
         if ("preferred rewards" in desc_lower or "prfd rwds" in desc_lower) and "waiver" in desc_lower:
             return "out"
