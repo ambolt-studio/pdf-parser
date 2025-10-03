@@ -9,12 +9,12 @@ from .base import (
 
 class BOFAParser(BaseBankParser):
     key = "bofa"
-    version = "2024.10.03.v5-line-splitting"
+    version = "2024.10.03.v6-fix-date-pattern"
     
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
         raw_lines = extract_lines(pdf_bytes)
         
-        # NUEVO: Pre-procesar líneas para dividir concatenaciones
+        # Pre-procesar líneas para dividir concatenaciones
         lines = self._split_concatenated_lines(raw_lines)
         
         year = detect_year(full_text)
@@ -48,7 +48,7 @@ class BOFAParser(BaseBankParser):
             if self._is_noise_line(line):
                 continue
             
-            # Extraer fecha
+            # Extraer fecha - DEBE tener año (MM/DD/YY)
             date = self._extract_date(line, year)
             if not date:
                 continue
@@ -83,24 +83,22 @@ class BOFAParser(BaseBankParser):
     
     def _split_concatenated_lines(self, lines: List[str]) -> List[str]:
         """
-        Pre-procesar líneas para dividir concatenaciones problemáticas.
-        Si una línea contiene tanto elementos de header como de transacción,
-        intentar dividirla.
+        Pre-procesar líneas para dividir concatenaciones.
+        Divide por fechas MM/DD/YY (transacciones) pero NO por MM/DD (balances).
         """
         processed = []
         
         for line in lines:
-            # Si la línea es muy larga y contiene múltiples fechas MM/DD
+            # Solo dividir líneas muy largas
             if len(line) > 200:
-                # Intentar dividir por fechas MM/DD/YY
-                # Esto captura: "header text 10/10/24 WIRE TYPE:..."
+                # Dividir SOLO por fechas con año: MM/DD/YY
+                # Esto evita dividir la tabla de balances que usa MM/DD
                 parts = re.split(r'(\d{1,2}/\d{1,2}/\d{2}\s+)', line)
                 
-                # Reconstruir manteniendo las fechas con sus descripciones
                 temp_line = ""
                 for part in parts:
+                    # Si es una fecha con año, guardar línea anterior y empezar nueva
                     if re.match(r'^\d{1,2}/\d{1,2}/\d{2}\s+$', part):
-                        # Es una fecha, guardar línea anterior y empezar nueva
                         if temp_line.strip():
                             processed.append(temp_line.strip())
                         temp_line = part
@@ -115,7 +113,7 @@ class BOFAParser(BaseBankParser):
         return processed
     
     def _contains_header_phrases(self, text: str) -> bool:
-        """Verificar si el texto contiene frases típicas de headers"""
+        """Verificar si el texto contiene frases de headers"""
         text_lower = text.lower()
         
         bad_phrases = [
@@ -124,14 +122,15 @@ class BOFAParser(BaseBankParser):
             "business advantage relationship",
             "preferred rewards for bus",
             "account summary",
-            "important information"
+            "important information",
+            "daily ledger balances"
         ]
         
         for phrase in bad_phrases:
             if phrase in text_lower:
                 return True
         
-        # Si contiene "account #" seguido de números largos (número de cuenta)
+        # Si contiene "account #" con número de cuenta completo
         if re.search(r"account\s*#\s*\d{4}\s+\d{4}\s+\d{4}", text_lower):
             return True
         
@@ -186,18 +185,24 @@ class BOFAParser(BaseBankParser):
         if re.match(r"^\s*date\s+description\s+amount\s*$", line_lower):
             return True
         
-        # Filtrar líneas que son solo fecha + monto (balances)
+        # CRÍTICO: Filtrar líneas que son SOLO fecha sin año + monto
+        # Esto captura los balances diarios: "08/12 219,339.81"
         if re.match(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s*$", line):
             return True
         
+        # Líneas con múltiples pares fecha+balance
         if re.match(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s+\d{1,2}/\d{1,2}", line):
             return True
         
         return False
     
     def _extract_date(self, line: str, year: int) -> str | None:
-        """Extraer fecha MM/DD/YY"""
-        match = re.match(r"(\d{1,2})/(\d{1,2})/(\d{2})", line.strip())
+        """
+        Extraer fecha MM/DD/YY.
+        IMPORTANTE: Solo acepta fechas CON año (dos dígitos).
+        Esto evita confundir balances (MM/DD) con transacciones (MM/DD/YY).
+        """
+        match = re.match(r"(\d{1,2})/(\d{1,2})/(\d{2})\b", line.strip())
         if match:
             mm, dd, yy = match.groups()
             full_year = int(yy) + 2000 if int(yy) < 50 else int(yy) + 1900
