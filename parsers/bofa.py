@@ -9,7 +9,7 @@ from .base import (
 
 class BOFAParser(BaseBankParser):
     key = "bofa"
-    version = "2025.10.03.v10-fees-nodedupe"
+    version = "2025.10.03.v11-multifees"
     
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
         raw_lines = extract_lines(pdf_bytes)
@@ -25,7 +25,6 @@ class BOFAParser(BaseBankParser):
             if not line.strip():
                 continue
             
-            # Detectar sección de balances diarios
             if self._is_daily_balance_section(line):
                 in_daily_balances = True
                 continue
@@ -44,17 +43,10 @@ class BOFAParser(BaseBankParser):
             if self._is_noise_line(line):
                 continue
             
-            # Extraer fecha
             date = self._extract_date(line, year)
             if not date:
                 continue
             
-            # Extraer monto
-            amount = self._extract_amount(line)
-            if amount is None:
-                continue
-            
-            # Limpiar descripción
             description = self._clean_description(line)
             if not description or len(description) < 5:
                 continue
@@ -62,19 +54,32 @@ class BOFAParser(BaseBankParser):
             if self._contains_header_phrases(description) or self._looks_like_balance_entry(description):
                 continue
             
-            # --- 🔧 Regla especial: Service Fees ---
+            # --- 🔧 Regla especial: Service Fees con múltiplos ---
             if current_section == "withdrawals" and "wire transfer fee" in description.lower():
-                if amount > 0:
+                # Buscar todos los montos en la línea
+                amounts = RE_AMOUNT.findall(line)
+                for amt_str in amounts:
+                    clean_amt = amt_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
+                    try:
+                        amt = float(clean_amt)
+                    except:
+                        continue
+                    # ignorar waivers ($0)
+                    if amt == 0:
+                        continue
                     results.append({
                         "date": date,
                         "description": "Wire Transfer Fee",
-                        "amount": amount,
+                        "amount": amt,
                         "direction": "out"
                     })
-                # ignorar fee waivers ($0)
                 continue
             
-            # Dirección normal
+            # Extraer monto normal
+            amount = self._extract_amount(line)
+            if amount is None:
+                continue
+            
             direction = self._determine_direction(description, current_section)
             if not direction:
                 continue
@@ -106,9 +111,6 @@ class BOFAParser(BaseBankParser):
         return unique
     
     def _looks_like_balance_entry(self, text: str) -> bool:
-        """
-        Detectar si el texto parece ser una entrada de balance diario.
-        """
         text_lower = text.lower()
         dates_without_year = re.findall(r'\b\d{1,2}/\d{1,2}\b(?!/\d{2})', text)
         if len(dates_without_year) >= 2:
@@ -123,7 +125,6 @@ class BOFAParser(BaseBankParser):
         return False
     
     def _split_concatenated_lines(self, lines: List[str]) -> List[str]:
-        """Dividir líneas concatenadas por fechas con año"""
         processed = []
         for line in lines:
             if len(line) > 200:
@@ -143,7 +144,6 @@ class BOFAParser(BaseBankParser):
         return processed
     
     def _contains_header_phrases(self, text: str) -> bool:
-        """Verificar frases de headers"""
         text_lower = text.lower()
         bad_phrases = [
             "this page intentionally left blank",
@@ -163,7 +163,6 @@ class BOFAParser(BaseBankParser):
         return False
     
     def _is_daily_balance_section(self, line: str) -> bool:
-        """Detectar encabezado de tabla de balances"""
         line_lower = line.lower().strip()
         if "daily ledger balances" in line_lower:
             return True
@@ -172,7 +171,6 @@ class BOFAParser(BaseBankParser):
         return False
     
     def _detect_section(self, line: str) -> str | None:
-        """Detectar sección del statement"""
         line_lower = line.lower().strip()
         if "deposits and other additions" in line_lower or "deposits and other credits" in line_lower:
             return "deposits"
@@ -185,7 +183,6 @@ class BOFAParser(BaseBankParser):
         return None
     
     def _is_noise_line(self, line: str) -> bool:
-        """Filtrar ruido"""
         line_lower = line.lower()
         noise_patterns = [
             "bank of america", "your checking account", "account summary",
@@ -209,7 +206,6 @@ class BOFAParser(BaseBankParser):
         return False
     
     def _extract_date(self, line: str, year: int) -> str | None:
-        """Extraer fecha MM/DD/YY (con año obligatorio)"""
         match = re.match(r"(\d{1,2})/(\d{1,2})/(\d{2})\b", line.strip())
         if match:
             mm, dd, yy = match.groups()
@@ -218,7 +214,6 @@ class BOFAParser(BaseBankParser):
         return None
     
     def _extract_amount(self, line: str) -> float | None:
-        """Extraer monto"""
         amounts = RE_AMOUNT.findall(line)
         if not amounts:
             return None
@@ -226,7 +221,6 @@ class BOFAParser(BaseBankParser):
         clean = amount_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
         try:
             amount = float(clean)
-            # 🔧 solo descartamos montos absurdos muy altos
             if amount > 100000000:
                 return None
             return amount
@@ -234,7 +228,6 @@ class BOFAParser(BaseBankParser):
             return None
     
     def _clean_description(self, line: str) -> str:
-        """Limpiar descripción"""
         cleaned = re.sub(r"^\s*\d{1,2}/\d{1,2}/\d{2}\s+", "", line)
         cleaned = re.sub(RE_AMOUNT.pattern, "", cleaned)
         cleaned = re.sub(r"\s*continued\s+on\s+the\s+next\s+page\s*$", "", cleaned, flags=re.I)
@@ -242,7 +235,6 @@ class BOFAParser(BaseBankParser):
         return cleaned.strip()
     
     def _determine_direction(self, description: str, section_context: str = None) -> str | None:
-        """Determinar dirección"""
         desc_lower = description.lower()
         
         if (re.search(r"wire type:\s*wire in", desc_lower) or 
@@ -284,6 +276,5 @@ class BOFAParser(BaseBankParser):
         return None
     
     def _extract_trn(self, desc: str) -> str | None:
-        """Extraer TRN de la descripción (si existe)"""
         m = re.search(r"TRN[:#]?\s*([A-Za-z0-9]+)", desc)
         return m.group(1) if m else None
