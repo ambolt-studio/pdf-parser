@@ -20,9 +20,23 @@ class BOFAParser(BaseBankParser):
         
         # Estrategia: procesar línea por línea pero también detectar contexto de sección
         current_section = None
+        in_daily_balances = False  # Nueva bandera para detectar tabla de balances
         
         for i, line in enumerate(lines):
             if not line.strip():
+                continue
+            
+            # Detectar si entramos en la sección de Daily Ledger Balances
+            if self._is_daily_balance_section(line):
+                in_daily_balances = True
+                continue
+            
+            # Si estamos en daily balances, saltar todas las líneas hasta encontrar otra sección
+            if in_daily_balances:
+                # Salir de daily balances si encontramos un nuevo encabezado de sección
+                if self._detect_section(line):
+                    in_daily_balances = False
+                    current_section = self._detect_section(line)
                 continue
             
             # Detectar cambio de sección para contexto
@@ -63,6 +77,20 @@ class BOFAParser(BaseBankParser):
             })
         
         return results
+    
+    def _is_daily_balance_section(self, line: str) -> bool:
+        """Detectar si es el encabezado de la tabla de balances diarios"""
+        line_lower = line.lower().strip()
+        
+        # Detectar encabezados de tabla de balances
+        if "daily ledger balances" in line_lower:
+            return True
+        
+        # Detectar header de columnas de balances: "Date Balance($)" o "Date Balance ($)"
+        if re.match(r"^\s*date\s+balance\s*\(\s*\$\s*\)", line_lower):
+            return True
+        
+        return False
     
     def _detect_section(self, line: str) -> str | None:
         """Detectar en qué sección del statement estamos"""
@@ -108,8 +136,20 @@ class BOFAParser(BaseBankParser):
         if re.match(r"^\s*date\s+description\s+amount\s*$", line_lower):
             return True
         
-        # Filtrar balances diarios: patrón exacto MM/DD balance MM/DD
+        # CRÍTICO: Filtrar líneas de balance diario
+        # Patrón: solo fecha corta (MM/DD) seguida de un monto grande, sin descripción
+        # Ejemplos: "10/10 210722.99", "08/12 3,000.00"
+        if re.match(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s*$", line):
+            return True
+        
+        # También filtrar el formato con dos fechas (balances diarios en dos columnas)
         if re.match(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s+\d{1,2}/\d{1,2}\s*$", line):
+            return True
+        
+        # Filtrar líneas que tienen 3 o más pares de fecha+balance (formato de tabla)
+        date_balance_pattern = r"\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}"
+        matches = re.findall(date_balance_pattern, line)
+        if len(matches) >= 3:
             return True
         
         # Nueva regla: filtrar líneas que son solo metadata sin transacción real
