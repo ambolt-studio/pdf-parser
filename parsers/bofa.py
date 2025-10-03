@@ -12,7 +12,7 @@ from .base import (
 
 class BOFAParser(BaseBankParser):
     key = "bofa"
-    version = "2024.10.03-daily-balance-fix"  # Version identifier for debugging
+    version = "2024.10.03.v2-aggressive-filtering"
     
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
         lines = extract_lines(pdf_bytes)
@@ -21,10 +21,14 @@ class BOFAParser(BaseBankParser):
         
         # Estrategia: procesar línea por línea pero también detectar contexto de sección
         current_section = None
-        in_daily_balances = False  # Nueva bandera para detectar tabla de balances
+        in_daily_balances = False
         
         for i, line in enumerate(lines):
             if not line.strip():
+                continue
+            
+            # CRÍTICO: Filtrar líneas concatenadas problemáticas ANTES de procesar
+            if self._is_concatenated_header(line):
                 continue
             
             # Detectar si entramos en la sección de Daily Ledger Balances
@@ -34,7 +38,6 @@ class BOFAParser(BaseBankParser):
             
             # Si estamos en daily balances, saltar todas las líneas hasta encontrar otra sección
             if in_daily_balances:
-                # Salir de daily balances si encontramos un nuevo encabezado de sección
                 if self._detect_section(line):
                     in_daily_balances = False
                     current_section = self._detect_section(line)
@@ -79,15 +82,45 @@ class BOFAParser(BaseBankParser):
         
         return results
     
+    def _is_concatenated_header(self, line: str) -> bool:
+        """
+        Detectar líneas que son headers concatenados del PDF.
+        Estas líneas tienen múltiples elementos de diferentes partes del statement.
+        """
+        line_lower = line.lower()
+        
+        # Patrón específico: contiene nombre de empresa + "account #" + "this page intentionally left blank"
+        # Esto indica que es una línea concatenada de múltiples páginas
+        if all(phrase in line_lower for phrase in ["syla global solutions", "account #", "this page intentionally left blank"]):
+            return True
+        
+        # Patrón: contiene nombre de empresa + "account #" + rango de fechas largo
+        # Ejemplo: "SYLA GLOBAL SOLUTIONS INC ! Account # 8981 4301 4932 ! October 1, 2024 to October 31, 2024"
+        if all(phrase in line_lower for phrase in ["syla global solutions", "account #", "to"]) and "2024" in line:
+            # Verificar que no es una transacción real (transacciones tienen "WIRE TYPE:" o similares)
+            if "wire type:" not in line_lower and "online banking" not in line_lower:
+                return True
+        
+        # Líneas que son demasiado largas y contienen muchos elementos de header
+        if len(line) > 150 and ("account #" in line_lower or "page" in line_lower):
+            # Contar cuántos indicadores de header tiene
+            header_indicators = sum(1 for phrase in [
+                "bank of america", "account #", "page", "of", 
+                "your checking account", "this page", "intentionally"
+            ] if phrase in line_lower)
+            
+            if header_indicators >= 3:
+                return True
+        
+        return False
+    
     def _is_daily_balance_section(self, line: str) -> bool:
         """Detectar si es el encabezado de la tabla de balances diarios"""
         line_lower = line.lower().strip()
         
-        # Detectar encabezados de tabla de balances
         if "daily ledger balances" in line_lower:
             return True
         
-        # Detectar header de columnas de balances: "Date Balance($)" o "Date Balance ($)"
         if re.match(r"^\s*date\s+balance\s*\(\s*\$\s*\)", line_lower):
             return True
         
@@ -112,7 +145,6 @@ class BOFAParser(BaseBankParser):
         """Filtrar líneas que claramente no son transacciones"""
         line_lower = line.lower()
         
-        # Headers y títulos - MÁS ESPECÍFICOS
         noise_patterns = [
             "bank of america", "your checking account", "account summary", 
             "deposits and other credits", "withdrawals and other debits", 
@@ -127,42 +159,30 @@ class BOFAParser(BaseBankParser):
             "business advantage fundamentals", "this page intentionally left blank"
         ]
         
-        # Solo filtrar si la línea EMPIEZA con estos patrones o los contiene como línea completa
         for pattern in noise_patterns:
             if line_lower.strip() == pattern or line_lower.startswith(pattern):
                 return True
         
-        # Filtrar líneas que son solo headers de tabla sin transacción
-        # Ejemplo: "Date Description Amount"
         if re.match(r"^\s*date\s+description\s+amount\s*$", line_lower):
             return True
         
-        # CRÍTICO: Filtrar líneas de balance diario
-        # Patrón: solo fecha corta (MM/DD) seguida de un monto grande, sin descripción
-        # Ejemplos: "10/10 210722.99", "08/12 3,000.00"
+        # Filtrar líneas de balance diario: MM/DD + monto sin descripción
         if re.match(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s*$", line):
             return True
         
-        # También filtrar el formato con dos fechas (balances diarios en dos columnas)
         if re.match(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s+\d{1,2}/\d{1,2}\s*$", line):
             return True
         
-        # Filtrar líneas que tienen 3 o más pares de fecha+balance (formato de tabla)
+        # Filtrar líneas con múltiples pares fecha+balance (tabla de balances)
         date_balance_pattern = r"\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}"
         matches = re.findall(date_balance_pattern, line)
         if len(matches) >= 3:
-            return True
-        
-        # Nueva regla: filtrar líneas que son solo metadata sin transacción real
-        # Buscar líneas que tengan "SYLA GLOBAL SOLUTIONS INC" seguido de "Account #" (son headers)
-        if "syla global solutions inc" in line_lower and "account #" in line_lower:
             return True
         
         return False
     
     def _extract_date(self, line: str, year: int) -> str | None:
         """Extraer fecha del formato MM/DD/YY al inicio de la línea"""
-        # Buscar MM/DD/YY al inicio de la línea
         match = re.match(r"(\d{1,2})/(\d{1,2})/(\d{2})", line.strip())
         if match:
             mm, dd, yy = match.groups()
@@ -176,15 +196,13 @@ class BOFAParser(BaseBankParser):
         if not amounts:
             return None
         
-        # Para wire transfers, el monto suele estar al final de la línea
-        # Tomar el ÚLTIMO monto encontrado, no el primero
+        # Tomar el ÚLTIMO monto (suele ser el monto de la transacción en wire transfers)
         amount_str = amounts[-1]
         
-        # Limpiar y convertir
         clean = amount_str.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
         try:
             amount = float(clean)
-            # Validar que el monto sea razonable (no un número de cuenta o ID)
+            # Validar rango razonable
             if amount < 0.01 or amount > 10000000:
                 return None
             return amount
@@ -203,7 +221,7 @@ class BOFAParser(BaseBankParser):
         cleaned = re.sub(r"\s*continued\s+on\s+the\s+next\s+page\s*$", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\s*total\s+deposits\s+and\s+other\s+credits\s*$", "", cleaned, flags=re.I)
         
-        # Remover exceso de espacios
+        # Normalizar espacios
         cleaned = re.sub(r"\s+", " ", cleaned)
         
         return cleaned.strip()
@@ -212,16 +230,14 @@ class BOFAParser(BaseBankParser):
         """Determinar dirección con reglas claras y contexto de sección"""
         desc_lower = description.lower()
         
-        # PRIORIDAD 1: Usar contexto de sección para la mayoría de casos
-        # Solo usar reglas específicas para casos muy claros
-        
-        # Regla 1: WIRE IN, INTL IN y BOOK IN siempre son entradas
+        # Regla 1: WIRE IN, INTL IN, BOOK IN, FX IN siempre son entradas
         if (re.search(r"wire type:\s*wire in", desc_lower) or 
             re.search(r"wire type:\s*intl in", desc_lower) or
-            re.search(r"wire type:\s*book in", desc_lower)):
+            re.search(r"wire type:\s*book in", desc_lower) or
+            re.search(r"wire type:\s*fx in", desc_lower)):
             return "in"
         
-        # Regla 2: WIRE OUT, INTL OUT, FX OUT y BOOK OUT siempre son salidas
+        # Regla 2: WIRE OUT, INTL OUT, FX OUT, BOOK OUT siempre son salidas
         if (re.search(r"wire type:\s*wire out", desc_lower) or 
             re.search(r"wire type:\s*intl out", desc_lower) or
             re.search(r"wire type:\s*fx out", desc_lower) or
@@ -229,15 +245,15 @@ class BOFAParser(BaseBankParser):
             return "out"
         
         # Regla 3: Zelle payments FROM alguien son entradas
-        if ("zelle payment from" in desc_lower):
+        if "zelle payment from" in desc_lower:
             return "in"
         
         # Regla 4: Zelle payments TO alguien son salidas
-        if ("zelle payment to" in desc_lower):
+        if "zelle payment to" in desc_lower:
             return "out"
         
         # Regla 5: Transfers FROM alguien (via WISE) son entradas
-        if ("transfer" in desc_lower and "from" in desc_lower and "via wise" in desc_lower):
+        if "transfer" in desc_lower and "from" in desc_lower and "via wise" in desc_lower:
             return "in"
         
         # Regla 6: Fees y charges siempre son salidas
@@ -252,7 +268,7 @@ class BOFAParser(BaseBankParser):
         ]):
             return "out"
         
-        # Regla 8: Palabras clave específicas de entrada (independiente de sección)
+        # Regla 8: Palabras clave específicas de entrada
         if any(keyword in desc_lower for keyword in [
             "deposit", "credit", "received", "cashreward"
         ]):
@@ -262,66 +278,47 @@ class BOFAParser(BaseBankParser):
         if ("preferred rewards" in desc_lower or "prfd rwds" in desc_lower) and "waiver" in desc_lower:
             return "out"
         
-        # Regla 10: Online Banking Transfer - puede ser entrada o salida dependiendo del contexto
-        if "online banking transfer" in desc_lower:
-            # Si tiene "conf#" seguido de descripción, usar contexto de sección
+        # Regla 10: Online Banking Transfer - depende del contexto
+        if "online banking transfer" in desc_lower or "online transfer" in desc_lower:
             if section_context:
                 return "in" if section_context == "deposits" else "out"
         
-        # Regla 11: CA TLR transfer (teller transfer) - usar contexto de sección
+        # Regla 11: CA TLR transfer (teller transfer) - depende del contexto
         if "ca tlr transfer" in desc_lower or "teller transfer" in desc_lower:
             if section_context:
                 return "in" if section_context == "deposits" else "out"
         
-        # Regla 12: BKOFAMERICA BC (bank cashier) - usar contexto de sección
+        # Regla 12: BKOFAMERICA BC (bank cashier) - depende del contexto
         if "bkofamerica bc" in desc_lower:
             if section_context:
                 return "in" if section_context == "deposits" else "out"
         
-        # PRIORIDAD 2: Usar contexto de sección para todo lo demás
-        # Si estamos en una sección específica, confiar en esa clasificación
+        # PRIORIDAD 2: Usar contexto de sección
         if section_context == "deposits":
             return "in"
         elif section_context == "withdrawals":
             return "out"
         
-        # PRIORIDAD 3: Reglas de fallback solo si no hay contexto
-        
-        # Transfers con "confirmation#" - asumir salida por defecto
+        # PRIORIDAD 3: Reglas de fallback
         if "transfer" in desc_lower and "confirmation#" in desc_lower:
             return "out"
         
-        # Online Banking - asumir salida por defecto  
-        if ("online banking" in desc_lower and any(kw in desc_lower for kw in ["payment", "transfer"])):
+        if "online banking" in desc_lower and any(kw in desc_lower for kw in ["payment", "transfer"]):
             return "out"
         
-        # Wise Inc - asumir entrada por defecto si no hay contexto
         if "wise inc" in desc_lower:
-            if "-" in description:
-                return "out"
-            else:
-                return "in"
+            return "out" if "-" in description else "in"
         
-        # ONTOP Holdings como entrada
         if "ontop holdings" in desc_lower:
             return "in"
         
-        # Patrones ACH específicos SOLO para casos muy claros (no DES:PAYMENT genérico)
-        if ("des:" in desc_lower and 
-            any(pattern in desc_lower for pattern in ["alejandr", "leonardo"]) and
-            "payment" not in desc_lower):
+        if "des:" in desc_lower and any(pattern in desc_lower for pattern in ["alejandr", "leonardo"]) and "payment" not in desc_lower:
             return "in"
         
-        # Account verification - analizar por contexto
         if "acctverify" in desc_lower or "des:acctverify" in desc_lower:
-            if "-" in description:
-                return "out"
-            else:
-                return "in"
+            return "out" if "-" in description else "in"
         
-        # Si contiene beneficiario (BNF:), probablemente es salida
         if "bnf:" in desc_lower:
             return "out"
         
-        # Sin contexto y sin reglas específicas, ser conservador
         return "out"
