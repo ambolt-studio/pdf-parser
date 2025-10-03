@@ -25,7 +25,6 @@ class BOFAParser(BaseBankParser):
             if not line.strip():
                 continue
             
-            # Detectar sección de balances diarios
             if self._is_daily_balance_section(line):
                 in_daily_balances = True
                 continue
@@ -41,11 +40,9 @@ class BOFAParser(BaseBankParser):
                 current_section = section_detected
                 continue
             
-            # Check noise BEFORE extracting date to avoid false positives
             if self._is_noise_line(line):
                 continue
 
-            # ⚡️ CASO ESPECIAL: Wire Transfer Fees (puede haber varios en 1 línea)
             if "wire transfer fee" in line.lower():
                 date = self._extract_date(line, year)
                 if not date:
@@ -56,7 +53,7 @@ class BOFAParser(BaseBankParser):
                     clean_amt = amt.replace("$", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
                     try:
                         val = float(clean_amt)
-                        if val > 0.01:  # ignoramos los $0 (waivers)
+                        if val > 0.01:
                             results.append({
                                 "date": date,
                                 "description": "Wire Transfer Fee",
@@ -67,7 +64,6 @@ class BOFAParser(BaseBankParser):
                         continue
                 continue
             
-            # DEBE tener fecha con año (MM/DD/YY)
             date = self._extract_date(line, year)
             if not date:
                 continue
@@ -77,11 +73,9 @@ class BOFAParser(BaseBankParser):
                 continue
             
             description = self._clean_description(line)
-            # Reduced minimum length from 10 to 5 to capture short descriptions like "CA TLR transfer"
             if not description or len(description) < 5:
                 continue
             
-            # NO debe contener frases de header NI patrones de balance
             if self._contains_header_phrases(description) or self._looks_like_balance_entry(description):
                 continue
             
@@ -173,7 +167,6 @@ class BOFAParser(BaseBankParser):
     def _is_noise_line(self, line: str) -> bool:
         line_lower = line.lower()
         
-        # Header/footer patterns - exact matches only
         exact_noise = [
             "bank of america",
             "your checking account", 
@@ -201,23 +194,18 @@ class BOFAParser(BaseBankParser):
             if line_stripped == pattern or line_stripped.startswith(pattern + " "):
                 return True
         
-        # Page numbers
         if re.match(r"^\s*page\s+\d+\s+of\s+\d+\s*$", line_lower):
             return True
         
-        # "continued on" messages
         if "continued on" in line_lower and "next page" in line_lower:
             return True
         
-        # Date header line
         if re.match(r"^\s*date\s+description\s+amount\s*$", line_lower):
             return True
         
-        # Balance lines WITHOUT transaction keywords
         if re.match(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s*$", line):
             return True
         
-        # Multiple balance entries on one line
         if re.match(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s+\d{1,2}/\d{1,2}", line):
             return True
         
@@ -255,7 +243,6 @@ class BOFAParser(BaseBankParser):
     def _determine_direction(self, description: str, section_context: str = None) -> str | None:
         desc_lower = description.lower()
         
-        # Wire transfers - explicit direction in description
         if (re.search(r"wire type:\s*wire in", desc_lower) or 
             re.search(r"wire type:\s*intl in", desc_lower) or
             re.search(r"wire type:\s*book in", desc_lower) or
@@ -268,33 +255,26 @@ class BOFAParser(BaseBankParser):
             re.search(r"wire type:\s*book out", desc_lower)):
             return "out"
         
-        # Zelle
         if "zelle payment from" in desc_lower:
             return "in"
         if "zelle payment to" in desc_lower:
             return "out"
         
-        # Wise transfers
         if "transfer" in desc_lower and "from" in desc_lower and "via wise" in desc_lower:
             return "in"
         
-        # Fees
         if any(keyword in desc_lower for keyword in ["fee", "charge", "svc charge"]):
             return "out"
         
-        # Checkcard/Purchase
         if any(keyword in desc_lower for keyword in ["checkcard", "purchase"]):
             return "out"
         
-        # Deposits
         if any(keyword in desc_lower for keyword in ["deposit", "credit", "received", "cashreward"]):
             return "in"
         
-        # Waivers
         if ("preferred rewards" in desc_lower or "prfd rwds" in desc_lower) and "waiver" in desc_lower:
             return "out"
         
-        # Transfers - rely on section context
         if "online banking transfer" in desc_lower or "online transfer" in desc_lower:
             if section_context:
                 return "in" if section_context == "deposits" else "out"
@@ -307,13 +287,11 @@ class BOFAParser(BaseBankParser):
             if section_context:
                 return "in" if section_context == "deposits" else "out"
         
-        # Section context as fallback
         if section_context == "deposits":
             return "in"
         elif section_context == "withdrawals":
             return "out"
         
-        # Specific patterns
         if "transfer" in desc_lower and "confirmation#" in desc_lower:
             return "out"
         
@@ -329,5 +307,4 @@ class BOFAParser(BaseBankParser):
         if "bnf:" in desc_lower:
             return "out"
         
-        # Default fallback
         return "out"
