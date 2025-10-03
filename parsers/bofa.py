@@ -5,17 +5,18 @@ from .base import (
     extract_lines,
     detect_year,
     RE_AMOUNT,
-    parse_mmdd_token,
-    parse_long_date,
-    parse_mmmdd,
 )
 
 class BOFAParser(BaseBankParser):
     key = "bofa"
-    version = "2024.10.03.v4-nuclear-filter"
+    version = "2024.10.03.v5-line-splitting"
     
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
-        lines = extract_lines(pdf_bytes)
+        raw_lines = extract_lines(pdf_bytes)
+        
+        # NUEVO: Pre-procesar líneas para dividir concatenaciones
+        lines = self._split_concatenated_lines(raw_lines)
+        
         year = detect_year(full_text)
         results: List[Dict[str, Any]] = []
         
@@ -24,17 +25,6 @@ class BOFAParser(BaseBankParser):
         
         for i, line in enumerate(lines):
             if not line.strip():
-                continue
-            
-            # NUCLEAR OPTION: Si la descripción limpia contiene estas frases exactas, rechazar
-            cleaned_preview = self._clean_description(line).lower()
-            if "this page intentionally left blank" in cleaned_preview:
-                continue
-            if "syla global solutions inc" in cleaned_preview and "account #" in cleaned_preview:
-                continue
-            
-            # Filtrar líneas concatenadas
-            if self._is_concatenated_header(line):
                 continue
             
             # Detectar sección de balances diarios
@@ -73,16 +63,8 @@ class BOFAParser(BaseBankParser):
             if not description or len(description) < 10:
                 continue
             
-            # VALIDACIÓN FINAL: La descripción NO debe contener frases de header
-            desc_lower = description.lower()
-            if any(bad_phrase in desc_lower for bad_phrase in [
-                "this page intentionally left blank",
-                "account # 8981 4301 4932",
-                "october 1, 2024 to october 31, 2024",
-                "august 1, 2024 to august 31, 2024",
-                "your checking account",
-                "business advantage relationship"
-            ]):
+            # Validación: NO debe contener frases de header
+            if self._contains_header_phrases(description):
                 continue
             
             # Determinar dirección
@@ -99,26 +81,59 @@ class BOFAParser(BaseBankParser):
         
         return results
     
-    def _is_concatenated_header(self, line: str) -> bool:
-        """Detectar líneas que son headers concatenados"""
-        line_lower = line.lower()
+    def _split_concatenated_lines(self, lines: List[str]) -> List[str]:
+        """
+        Pre-procesar líneas para dividir concatenaciones problemáticas.
+        Si una línea contiene tanto elementos de header como de transacción,
+        intentar dividirla.
+        """
+        processed = []
         
-        # Patrón muy específico del problema actual
-        if "syla global solutions" in line_lower and "account #" in line_lower and "this page intentionally left blank" in line_lower:
+        for line in lines:
+            # Si la línea es muy larga y contiene múltiples fechas MM/DD
+            if len(line) > 200:
+                # Intentar dividir por fechas MM/DD/YY
+                # Esto captura: "header text 10/10/24 WIRE TYPE:..."
+                parts = re.split(r'(\d{1,2}/\d{1,2}/\d{2}\s+)', line)
+                
+                # Reconstruir manteniendo las fechas con sus descripciones
+                temp_line = ""
+                for part in parts:
+                    if re.match(r'^\d{1,2}/\d{1,2}/\d{2}\s+$', part):
+                        # Es una fecha, guardar línea anterior y empezar nueva
+                        if temp_line.strip():
+                            processed.append(temp_line.strip())
+                        temp_line = part
+                    else:
+                        temp_line += part
+                
+                if temp_line.strip():
+                    processed.append(temp_line.strip())
+            else:
+                processed.append(line)
+        
+        return processed
+    
+    def _contains_header_phrases(self, text: str) -> bool:
+        """Verificar si el texto contiene frases típicas de headers"""
+        text_lower = text.lower()
+        
+        bad_phrases = [
+            "this page intentionally left blank",
+            "your checking account",
+            "business advantage relationship",
+            "preferred rewards for bus",
+            "account summary",
+            "important information"
+        ]
+        
+        for phrase in bad_phrases:
+            if phrase in text_lower:
+                return True
+        
+        # Si contiene "account #" seguido de números largos (número de cuenta)
+        if re.search(r"account\s*#\s*\d{4}\s+\d{4}\s+\d{4}", text_lower):
             return True
-        
-        if "syla global solutions" in line_lower and "account #" in line_lower and ("october" in line_lower or "august" in line_lower) and " to " in line_lower:
-            if "wire type:" not in line_lower:
-                return True
-        
-        # Líneas con múltiples indicadores de header
-        if len(line) > 150:
-            header_count = sum(1 for phrase in [
-                "bank of america", "account #", "page", " of ",
-                "your checking", "this page", "intentionally"
-            ] if phrase in line_lower)
-            if header_count >= 3:
-                return True
         
         return False
     
@@ -160,36 +175,22 @@ class BOFAParser(BaseBankParser):
             "important information", "customer service", "page ", " of ",
             "date description amount",
             "total deposits", "total withdrawals", "total service fees",
-            "subtotal for card", "continued on", "beginning balance",
-            "ending balance", "average ledger", "your adv plus banking",
-            "deposits and other additions", "atm and debit card subtractions",
-            "other subtractions", "withdrawals and other subtractions",
-            "business advantage fundamentals", "this page intentionally left blank",
-            "business advantage relationship banking"
+            "continued on", "beginning balance", "ending balance",
+            "average ledger", "business advantage", "this page intentionally"
         ]
         
         for pattern in noise_patterns:
-            if line_lower.strip() == pattern or line_lower.startswith(pattern):
+            if line_lower.strip().startswith(pattern):
                 return True
-        
-        # No procesar líneas que empiezan con "account #"
-        if line_lower.strip().startswith("account #"):
-            return True
         
         if re.match(r"^\s*date\s+description\s+amount\s*$", line_lower):
             return True
         
-        # Filtrar balances diarios
+        # Filtrar líneas que son solo fecha + monto (balances)
         if re.match(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s*$", line):
             return True
         
-        if re.match(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s+\d{1,2}/\d{1,2}\s*$", line):
-            return True
-        
-        # Múltiples pares fecha+balance
-        date_balance_pattern = r"\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}"
-        matches = re.findall(date_balance_pattern, line)
-        if len(matches) >= 3:
+        if re.match(r"^\s*\d{1,2}/\d{1,2}\s+[\d,]+\.\d{2}\s+\d{1,2}/\d{1,2}", line):
             return True
         
         return False
@@ -224,7 +225,6 @@ class BOFAParser(BaseBankParser):
         cleaned = re.sub(r"^\s*\d{1,2}/\d{1,2}/\d{2}\s+", "", line)
         cleaned = re.sub(RE_AMOUNT.pattern, "", cleaned)
         cleaned = re.sub(r"\s*continued\s+on\s+the\s+next\s+page\s*$", "", cleaned, flags=re.I)
-        cleaned = re.sub(r"\s*total\s+deposits\s+and\s+other\s+credits\s*$", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\s+", " ", cleaned)
         return cleaned.strip()
     
@@ -251,9 +251,9 @@ class BOFAParser(BaseBankParser):
         if "transfer" in desc_lower and "from" in desc_lower and "via wise" in desc_lower:
             return "in"
         
-        if any(keyword in desc_lower for keyword in ["fee", "charge", "svc charge", "monthly fee"]):
+        if any(keyword in desc_lower for keyword in ["fee", "charge", "svc charge"]):
             return "out"
-        if any(keyword in desc_lower for keyword in ["checkcard", "purchase", "mobile purchase"]):
+        if any(keyword in desc_lower for keyword in ["checkcard", "purchase"]):
             return "out"
         if any(keyword in desc_lower for keyword in ["deposit", "credit", "received", "cashreward"]):
             return "in"
@@ -263,7 +263,7 @@ class BOFAParser(BaseBankParser):
         if "online banking transfer" in desc_lower or "online transfer" in desc_lower:
             if section_context:
                 return "in" if section_context == "deposits" else "out"
-        if "ca tlr transfer" in desc_lower or "teller transfer" in desc_lower:
+        if "ca tlr transfer" in desc_lower:
             if section_context:
                 return "in" if section_context == "deposits" else "out"
         if "bkofamerica bc" in desc_lower:
@@ -283,10 +283,6 @@ class BOFAParser(BaseBankParser):
             return "out" if "-" in description else "in"
         if "ontop holdings" in desc_lower:
             return "in"
-        if "des:" in desc_lower and any(p in desc_lower for p in ["alejandr", "leonardo"]) and "payment" not in desc_lower:
-            return "in"
-        if "acctverify" in desc_lower or "des:acctverify" in desc_lower:
-            return "out" if "-" in description else "in"
         if "bnf:" in desc_lower:
             return "out"
         
