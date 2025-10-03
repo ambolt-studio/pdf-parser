@@ -9,7 +9,7 @@ from .base import (
 
 class BOFAParser(BaseBankParser):
     key = "bofa"
-    version = "2025.10.03.v9-feesfix"
+    version = "2025.10.03.v10-fees-nodedupe"
     
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
         raw_lines = extract_lines(pdf_bytes)
@@ -90,7 +90,14 @@ class BOFAParser(BaseBankParser):
         seen = set()
         unique = []
         for tx in results:
+            desc_lower = tx["description"].lower()
             trn = self._extract_trn(tx["description"]) or ""
+            
+            # 🔧 Nunca deduplicar Wire Transfer Fee
+            if "wire transfer fee" in desc_lower:
+                unique.append(tx)
+                continue
+            
             key = (tx["date"], tx["amount"], tx["direction"], trn)
             if key not in seen:
                 seen.add(key)
