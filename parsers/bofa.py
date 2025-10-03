@@ -9,7 +9,7 @@ from .base import (
 
 class BOFAParser(BaseBankParser):
     key = "bofa"
-    version = "2024.10.03.v9-fee-fix"
+    version = "2024.10.04.v10-fee-date-fix"
     
     def parse(self, pdf_bytes: bytes, full_text: str) -> List[Dict[str, Any]]:
         raw_lines = extract_lines(pdf_bytes)
@@ -20,12 +20,12 @@ class BOFAParser(BaseBankParser):
         
         current_section = None
         in_daily_balances = False
+        last_date = None   # 🔑 guardamos la última fecha válida
         
-        for i, line in enumerate(lines):
+        for line in lines:
             if not line.strip():
                 continue
             
-            # Detectar sección de balances diarios
             if self._is_daily_balance_section(line):
                 in_daily_balances = True
                 continue
@@ -44,10 +44,16 @@ class BOFAParser(BaseBankParser):
             if self._is_noise_line(line):
                 continue
             
-            # DEBE tener fecha con año (MM/DD/YY)
+            # Buscar fecha explícita
             date = self._extract_date(line, year)
-            if not date:
-                continue
+            if date:
+                last_date = date
+            else:
+                # 🔑 Si no tiene fecha pero es un Wire Transfer Fee, usar la última fecha conocida
+                if "wire transfer fee" in line.lower() and last_date:
+                    date = last_date
+                else:
+                    continue
             
             amount = self._extract_amount(line)
             if amount is None or amount == 0:
@@ -57,7 +63,6 @@ class BOFAParser(BaseBankParser):
             if not description or len(description) < 5:
                 continue
             
-            # NO debe contener frases de header NI patrones de balance
             if self._contains_header_phrases(description) or self._looks_like_balance_entry(description):
                 continue
             
@@ -76,23 +81,19 @@ class BOFAParser(BaseBankParser):
     
     def _looks_like_balance_entry(self, text: str) -> bool:
         text_lower = text.lower()
-        
         dates_without_year = re.findall(r'\b\d{1,2}/\d{1,2}\b(?!/\d{2})', text)
         if len(dates_without_year) >= 2:
             return True
-        
         if re.search(r'\b\d{1,2}/\d{1,2}\b(?!/\d{2})', text):
-            has_transaction_indicators = any(ind in text_lower for ind in [
+            has_tx = any(ind in text_lower for ind in [
                 'wire type:', 'online banking', 'zelle', 'transfer', 'payment',
                 'checkcard', 'purchase', 'fee', 'deposit', 'withdrawal'
             ])
-            if not has_transaction_indicators:
+            if not has_tx:
                 return True
-        
         return False
     
     def _split_concatenated_lines(self, lines: List[str]) -> List[str]:
-        """Divide líneas largas en sub-líneas por fecha y por múltiples fees"""
         processed = []
         for line in lines:
             if len(line) > 200:
@@ -112,19 +113,10 @@ class BOFAParser(BaseBankParser):
         return processed
 
     def _expand_multiple_fees(self, line: str) -> List[str]:
-        """
-        Si una línea contiene múltiples 'Wire Transfer Fee' con montos,
-        las separa en pseudo-líneas independientes.
-        """
         fee_pattern = re.compile(r'(Wire Transfer Fee.*?\$?\s*\d+(?:\.\d{2})?)', re.I)
         matches = fee_pattern.findall(line)
         if matches and len(matches) > 1:
-            results = []
-            date_match = re.match(r'^\d{1,2}/\d{1,2}/\d{2}', line)
-            date_prefix = date_match.group(0) + " " if date_match else ""
-            for m in matches:
-                results.append(f"{date_prefix}{m}")
-            return results
+            return matches
         return [line]
 
     def _contains_header_phrases(self, text: str) -> bool:
