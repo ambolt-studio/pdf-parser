@@ -8,8 +8,9 @@ from .wf import WFParser
 from .citi import CitiParser
 from .truist import TruistParser
 from .bofa import BOFAParser
-from .bofa_relationship import BOFARelationshipParser
 from .chase import ChaseParser
+# Si añadiste bofa_relationship.py, descomenta estas dos líneas:
+# from .bofa_relationship import BOFARelationshipParser
 
 # Registramos CLASES, no instancias
 REGISTRY = {
@@ -22,38 +23,38 @@ REGISTRY = {
     "citi": CitiParser,
     "truist": TruistParser,
     "bofa": BOFAParser,
-    "bofa_relationship": BOFARelationshipParser,
+    # "bofa_relationship": BOFARelationshipParser,  # si lo agregaste
     "chase": ChaseParser,
 }
 
 # Patrones para detectar banco en el texto - ORDEN IMPORTANTE
 DETECTION = [
-    # Chase primero para evitar conflictos
-    ("chase", [
-        r"\bJPMorgan Chase Bank\b",
-        r"\bChase Bank\b",
-        r"\bChase Total Checking\b",
-        r"\bChase Savings\b",
-        r"chase\.com",
-        r"\bChase Mobile\b",
-        r"\bChase Debit Card\b"
-    ]),
-
-    # BOFA – layout extendido (Relationship Banking)
-    ("bofa_relationship", [
-        r"\bBusiness Advantage Relationship Banking\b",
-        r"\bPreferred Rewards for Bus\b",
-        r"\bcontinued on the next page\b",
-        r"Your checking account\s+Deposits and other credits",
-    ]),
-
-    # BOFA – layout normal (Fundamentals / estándar)
+    # --- BOFA primero (para no confundir wires que mencionan JPMorgan Chase) ---
     ("bofa", [
         r"\bBank of America\b",
         r"bankofamerica\.com",
         r"\bBOFA\b",
         r"\bBusiness Advantage\b",
         r"1\.888\.BUSINESS"
+    ]),
+
+    # Si tenés un parser separado para Relationship, ponelo ANTES del BOFA genérico
+    # ("bofa_relationship", [
+    #     r"\bBusiness Advantage Relationship Banking\b",
+    #     r"\bPreferred Rewards for Bus\b",
+    #     r"\bcontinued on the next page\b",
+    #     r"Your checking account\s+Deposits and other credits",
+    # ]),
+
+    # --- Chase después y con patrones más “de statement” (no de descripciones de wires) ---
+    ("chase", [
+        r"chase\.com",
+        r"\bChase Mobile\b",
+        r"\bChase Debit Card\b",
+        r"\bChase Total Checking\b",
+        r"\bChase Savings\b",
+        # OJO: evitamos patrones genéricos como "JPMorgan Chase Bank" o "Chase Bank"
+        # porque aparecen dentro de las descripciones de wires de otros bancos
     ]),
 
     ("ifb", [
@@ -76,7 +77,6 @@ DETECTION = [
         r"\bP\.O\. Box 012620, Miami\b",
         r"\bACCT ENDING\b"
     ]),
-    # Wells Fargo más específico
     ("wf", [
         r"\bWells Fargo\b",
         r"wellsfargo\.com",
